@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>RideComp v1.4 — Garmin Ride Comparator</title>
+  <meta name="description" content="Compare multiple Garmin .fit and .gpx rides with map overlay, elevation, HR, speed charts and training analytics."/>
+
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Mono:ital,wght@0,300;0,400;0,500;1,300&display=swap" rel="stylesheet"/>
+  <link rel="stylesheet" href="assets/style.css"/>
+
+</head>
+<body>
+<div id="app">
+
+<!-- TOP BAR -->
+<div id="topbar">
+  <div class="logo">Ride<em>Comp</em></div>
+  <div class="vsep"></div>
+  <div class="tagline">Garmin Ride Comparator</div>
+  <div class="tbr">
+    <span class="chip" id="chip-count">0 rides</span>
+    <span class="chip on" id="chip-live" style="display:none">● comparing</span>
+    <span class="chip warn" id="chip-unsaved" style="display:none">● unsaved</span>
+    <span class="chip" id="chip-user" style="display:none"></span>
+    <button class="btn ghost" id="btn-admin" style="display:none" onclick="openAdmin()">👥 Admin</button>
+    <button class="btn ghost" id="btn-mob-sb" style="padding:4px 8px;display:none" onclick="toggleMobPanel('sidebar')">☰</button>
+    <button class="btn ghost" id="btn-mob-st" style="padding:4px 8px;display:none" onclick="toggleMobPanel('sp')">📊</button>
+    <button class="btn ghost" title="Toggle light/dark" onclick="toggleTheme()">◑</button>
+    <button class="btn ghost" onclick="openSettings()">⚙ Settings</button>
+    <button class="btn" id="btn-sync" style="display:none" onclick="syncToSupabase()">↑ Sync</button>
+    <button class="btn" onclick="clearAll()">Clear</button>
+    <button class="btn primary" onclick="document.getElementById('fi').click()">+ Import</button>
+    <input type="file" id="fi" multiple accept=".fit,.gpx,.FIT,.GPX" onchange="handleFiles(this.files)"/>
+  </div>
+</div>
+
+<!-- MAIN -->
+<div id="main">
+
+  <!-- SIDEBAR -->
+  <div id="sidebar">
+    <div class="ph">
+      <span class="pt">Rides</span>
+      <span id="rc-lbl" style="font-size:10px;color:var(--mu)">0</span>
+      <button class="btn ghost" style="padding:3px 7px;font-size:10px" onclick="showAllRides()" title="Show all rides">All</button>
+    </div>
+    <div id="rides-list">
+      <div id="sb-empty" class="empty">
+        <div class="ei">🚴</div>
+        <div class="et">No rides loaded</div>
+        <div class="es">Drop .fit or .gpx files below</div>
+      </div>
+    </div>
+    <div id="dz" onclick="document.getElementById('fi').click()"
+         ondragover="onDragOver(event)" ondragleave="onDragLeave(event)" ondrop="onDrop(event)">
+      <div class="dz1">📂 Drop files here</div>
+      <div class="dz2">.fit or .gpx — multiple OK</div>
+    </div>
+    <div id="db-badge" onclick="openSettings()">
+      <div id="dbdot"></div>
+      <span id="dblbl">Local storage only</span>
+    </div>
+  </div>
+
+  <!-- MAP + CHART -->
+  <div id="map-panel">
+    <div id="map"></div>
+    <div id="mc">
+      <button class="mb on" onclick="setTile('dark',this)">Dark</button>
+      <button class="mb" onclick="setTile('sat',this)">Satellite</button>
+      <button class="mb" onclick="setTile('topo',this)">Topo</button>
+      <button class="mb" onclick="setTile('street',this)">Street</button>
+    </div>
+    <div id="mhl"></div>
+    <div id="cs">
+      <div class="csh">
+        <span class="cst">Profile</span>
+        <div class="cts">
+          <button class="ct on" onclick="setChart('elevation',this)">Elevation</button>
+          <button class="ct" onclick="setChart('hr',this)">Heart Rate</button>
+          <button class="ct" onclick="setChart('speed',this)">Speed</button>
+          <button class="ct" onclick="setChart('cadence',this)">Cadence</button>
+          <button class="ct" onclick="setChart('power',this)">Power</button>
+        </div>
+      </div>
+      <div id="cw"><canvas id="pc"></canvas></div>
+    </div>
+  </div>
+
+  <!-- STATS PANEL -->
+  <div id="sp">
+    <div class="stabs">
+      <div class="stab on" onclick="setTab('compare',this)">Compare</div>
+      <div class="stab" onclick="setTab('vitals',this)">Vitals</div>
+      <div class="stab" onclick="setTab('plan',this)">Plan</div>
+      <div class="stab" onclick="setTab('segments',this)">Segments</div>
+    </div>
+    <div id="sb">
+      <div id="st-empty" class="empty">
+        <div class="ei">📊</div>
+        <div class="et">No data</div>
+        <div class="es">Import rides to compare stats and plan training</div>
+      </div>
+    </div>
+  </div>
+
+</div><!-- /main -->
+</div><!-- /app -->
+
+<!-- SETTINGS / AUTH MODAL -->
+<div id="mb" onclick="closeModalBg(event)">
+<div class="modal" id="modal-inner">
+
+  <!-- AUTH VIEW (shown when not logged in) -->
+  <div id="view-auth">
+    <div class="mt">Sign in to RideComp</div>
+    <div class="ms">Sync rides across devices. Family plan: each membcouer's data is stored separately.</div>
+
+    <div class="auth-provider-btns">
+      <button class="auth-btn" onclick="authWith('github')">
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.531 1.032 1.531 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z"/></svg>
+        Continue with GitHub
+      </button>
+      <button class="auth-btn" onclick="authWith('google')">
+        <svg viewBox="0 0 24 24"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/></svg>
+        Continue with Google
+      </button>
+      <button class="auth-btn" onclick="authWith('facebook')">
+        <svg viewBox="0 0 24 24" fill="#1877F2"><path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z"/></svg>
+        Continue with Facebook
+      </button>
+    </div>
+
+    <div class="auth-divider">or request access</div>
+    <div class="fr">
+      <label class="fl">Full name</label>
+      <input class="fi2" id="reg-name" placeholder="Your name"/>
+    </div>
+    <div class="fr">
+      <label class="fl">Email</label>
+      <input class="fi2" id="reg-email" type="email" placeholder="you@example.com"/>
+    </div>
+    <div class="fr">
+      <label class="fl">Password</label>
+      <input class="fi2" id="reg-pass" type="password" placeholder="min 8 characters"/>
+      <div class="fh">Access requires admin approval. Unconfirmed requests expire in 24 hours.</div>
+    </div>
+    <div class="ma">
+      <button class="btn ghost" onclick="closeSettings()">Cancel</button>
+      <button class="btn" onclick="signInPassword()">Sign in</button>
+      <button class="btn primary" onclick="requestAccess()">Request access</button>
+    </div>
+  </div>
+
+  <!-- SETTINGS VIEW -->
+  <div id="view-settings" style="display:none">
+    <div class="mt">Settings</div>
+    <div class="ms">Configure Supabase sync and manage your data.</div>
+
+    <div id="view-config">
+      <div class="mst">Supabase configuration</div>
+      <div class="fr">
+        <label class="fl">Max HR for zone calculation</label>
+        <input class="fi2" id="cfg-maxhr" type="number" placeholder="190" value="190"/>
+      </div>
+    </div>
+
+    <div id="view-user-settings" style="display:none">
+      <div class="msec">
+        <div class="mst">Local database</div>
+        <div style="display:flex;gap:7px;flex-wrap:wrap">
+          <button class="btn" onclick="exportJSON()">↓ Export JSON</button>
+          <button class="btn" onclick="document.getElementById('json-in').click()">↑ Import JSON</button>
+          <button class="btn" onclick="exportGPX()">↓ Export GPX</button>
+          <button class="btn dbtn" onclick="nukeDB()">🗑 Clear local DB</button>
+        </div>
+        <input type="file" id="json-in" accept=".json" style="display:none" onchange="importJSON(this)"/>
+      </div>
+    </div>
+
+    <div class="ma">
+      <button class="btn dbtn" id="btn-sign-out" onclick="signOut()" style="display:none">Sign out</button>
+      <button class="btn ghost" onclick="closeSettings()">Close</button>
+      <button class="btn primary" onclick="saveSettings()">Save</button>
+    </div>
+  </div>
+
+</div><!-- /modal -->
+</div>
+
+<!-- ADMIN PANEL MODAL -->
+<div id="admin-mb" onclick="closeAdminBg(event)" style="position:fixed;inset:0;background:rgba(0,0,0,.72);z-index:810;display:none;align-items:center;justify-content:center;backdrop-filter:blur(4px)">
+<div class="modal" style="width:520px">
+  <div class="mt">👥 Admin — Access Requests</div>
+  <div class="ms">Manage family member registration requests. Pending requests auto-delete after 24h.</div>
+  <div id="admin-list"><div class="empty" style="height:80px"><div class="es">Loading…</div></div></div>
+  <div class="ma">
+    <button class="btn ghost" onclick="document.getElementById('admin-mb').style.display='none'">Close</button>
+    <button class="btn" onclick="loadAdminData()">↻ Refresh</button>
+  </div>
+</div>
+</div>
+
+<!-- LOADER -->
+<div id="ldr"><div class="ls"></div><div class="lm" id="lm">Processing…</div></div>
+<!-- TOAST -->
+<div id="toast"></div>
+
+<script src="assets/script.js"/>
+<script src="assets/exportGPX.js"></script>
+
+</body>
+</html>
