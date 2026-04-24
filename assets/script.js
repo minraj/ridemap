@@ -17,10 +17,14 @@ const HR_ZONES = [
 
 /* ═══════════════════════════════════════════════════════════════
    STATE
-═══════════════════════════════════════════════════════════════ */
+ ═══════════════════════════════════════════════════════════════ */
 let rides       = [];
-let selectedId  = null;   // null = show all
+let selectedIds = new Set();   // Set of active route IDs
+let lastSelectedId = null;     // The "Primary" route for ghosting
+let multiSelectMode = false;   // Controlled by UI toggle
 let map, tileLayer, profileChart, hoverMarker;
+
+let currentTile = 'dark';
 let currentChart = 'elevation';
 let currentTab   = 'compare';
 let sbClient     = null;
@@ -77,21 +81,39 @@ function setTileLayer(name) {
   if (tileLayer) map.removeLayer(tileLayer);
   const [url, attr] = TILES[name];
   tileLayer = L.tileLayer(url, {attribution:attr, maxZoom:19}).addTo(map);
-  // Update polyline styling for better visibility on this map type
-  const isDarkMap = name === 'dark';
+
+  const isLight = name === 'topo' || name === 'street';
+
+  // Remove previous halo layers
+  if (window._haloLayers) {
+    window._haloLayers.forEach(l => { try { map.removeLayer(l); } catch(_){} });
+  }
+  window._haloLayers = [];
+
   rides.forEach(r => {
-    if (map.hasLayer(r.poly)) {
-      r.poly.setStyle({
-        color: r.color,
-        weight: isDarkMap ? 2.5 : 3.5,
-        opacity: isDarkMap ? 0.88 : 1.0,
-        smoothFactor: 1
-      });
+    if (!map.hasLayer(r.poly)) return;
+    // Thicker + full opacity on light tiles so routes stay readable
+    r.poly.setStyle({
+      color: r.color,
+      weight: isLight ? 5 : 3.5,
+      opacity: 1,
+      smoothFactor: 1
+    });
+    if (isLight) {
+      // White halo beneath the coloured track for contrast on pale backgrounds
+      const halo = L.polyline(r.poly.getLatLngs(), {
+        color: '#ffffff', weight: 11, opacity: 0.65, interactive: false
+      }).addTo(map);
+      window._haloLayers.push(halo);
+      r.poly.bringToFront();
     }
   });
 }
+
+// (Remove brightenColor function)
 function setTile(name, btn) {
   setTileLayer(name);
+  currentTile = name;
   document.querySelectorAll('.mb').forEach(b => b.classList.remove('on'));
   btn.classList.add('on');
 }
@@ -334,9 +356,31 @@ function addRide(name, points, fileType, laps) {
   const stats = computeStats(points);
   const smap  = buildSampleMap(points);
 
-  const poly = L.polyline(points.map(p=>[p.lat,p.lng]), {color, weight:2.5, opacity:.88, smoothFactor:1}).addTo(map);
+  const poly = L.polyline(points.map(p=>[p.lat,p.lng]), {color, weight:2.5, opacity:.88, smoothFactor:1});
+  
+  // Climb segments
+  const steepPolys = [];
+  let currentClimb = [];
+  for (let i=1; i<points.length; i++) {
+    const d = haversine(points[i-1], points[i]);
+    const deltaEle = points[i].ele - points[i-1].ele;
+    const grade = d > 0.001 ? (deltaEle / (d * 1000)) * 100 : 0;
+    if (grade > 8) {
+      if (currentClimb.length === 0) currentClimb.push(points[i-1]);
+      currentClimb.push(points[i]);
+    } else {
+      if (currentClimb.length > 0) {
+        steepPolys.push(L.polyline(currentClimb.map(p=>[p.lat,p.lng]), {color: '#ff4500', weight: 4, opacity: 0.9}));
+        currentClimb = [];
+      }
+    }
+  }
+  if (currentClimb.length > 0) {
+    steepPolys.push(L.polyline(currentClimb.map(p=>[p.lat,p.lng]), {color: '#ff4500', weight: 4, opacity: 0.9}));
+  }
+  const group = L.layerGroup([poly, ...steepPolys]).addTo(map);
 
-  const ride = {id, name, color, points, smap, stats, fileType, laps, poly, visible:true};
+  const ride = {id, name, color, points, smap, stats, fileType, laps, poly, steepPolys, group, visible:true};
   rides.push(ride);
   map.fitBounds(poly.getBounds(), {padding:[26,26]});
 
@@ -350,19 +394,25 @@ function addRide(name, points, fileType, laps) {
 }
 
 function buildSampleMap(points) {
-  const n = points.length, target = Math.min(n, 600);
+  const n = points.length;
+  // Adaptive sampling: more points for shorter rides, fewer for long ones
+  const target = n < 200 ? n : n < 2000 ? Math.min(n, 400) : Math.min(n, 250);
   const step = n / target;
-  return Array.from({length:target}, (_,i) => Math.min(Math.floor(i*step), n-1));
+  const map = [];
+  for (let i = 0; i < target; i++) {
+    map.push(Math.min(Math.floor(i * step), n - 1));
+  }
+  return map;
 }
 
 async function removeRide(id, e) {
   e?.stopPropagation();
   const idx = rides.findIndex(r=>r.id===id);
   if (idx<0) return;
-  map.removeLayer(rides[idx].poly);
+  map.removeLayer(rides[idx].group);
   rides.splice(idx,1);
   pendingSync.delete(id);
-  if (selectedId === id) selectedId = null;
+  selectedIds.delete(id);
   await idbDel(id).catch(()=>{});
   updateUnsavedChip();
   refresh();
@@ -373,7 +423,7 @@ function toggleVis(id, e) {
   const r = rides.find(r=>r.id===id);
   if (!r) return;
   r.visible = !r.visible;
-  r.visible ? r.poly.addTo(map) : map.removeLayer(r.poly);
+  r.visible ? r.group.addTo(map) : map.removeLayer(r.group);
   refresh();
 }
 function zoomTo(id, e) {
@@ -382,22 +432,47 @@ function zoomTo(id, e) {
   if (r) map.fitBounds(r.poly.getBounds(), {padding:[26,26]});
 }
 
-function selectRide(id) {
-  // Toggle: clicking same ride again deselects (shows all)
-  selectedId = selectedId === id ? null : id;
+function toggleMultiSelect(enabled) {
+  multiSelectMode = enabled;
+  if (!enabled) {
+    // When turning off multi-select, keep only the last selected route (if any)
+    selectedIds.clear();
+    if (lastSelectedId) selectedIds.add(lastSelectedId);
+  }
+  saveState();
+  refresh();
+}
+
+function selectRide(id, e) {
+  if (!e) e = { ctrlKey: false, metaKey: false };
+  
+  if (multiSelectMode || e.ctrlKey || e.metaKey) {
+    if (selectedIds.has(id)) selectedIds.delete(id);
+    else selectedIds.add(id);
+  } else {
+    if (selectedIds.has(id) && selectedIds.size === 1) {
+      selectedIds.clear();
+    } else {
+      selectedIds.clear();
+      selectedIds.add(id);
+    }
+  }
+  
+  lastSelectedId = id;
   refresh();
 }
 
 function showAllRides() {
-  selectedId = null;
+
+  selectedIds.clear();
   // Show all polylines
   rides.forEach(r => { r.visible = true; if (!map.hasLayer(r.poly)) r.poly.addTo(map); });
   refresh();
 }
 
 async function clearAll() {
-  rides.forEach(r => map.removeLayer(r.poly));
-  rides = []; selectedId = null; pendingSync.clear();
+  rides.forEach(r => map.removeLayer(r.group));
+  rides = []; selectedIds.clear(); pendingSync.clear();
   if (profileChart) { profileChart.destroy(); profileChart = null; }
   await idbClear().catch(()=>{});
   updateUnsavedChip();
@@ -411,7 +486,18 @@ function computeStats(pts) {
   if (!pts.length) return {};
 
   let dist = 0;
-  for (let i=1; i<pts.length; i++) dist += haversine(pts[i-1], pts[i]);
+  let climbDist = 0;
+  for (let i=1; i<pts.length; i++) {
+    const d = haversine(pts[i-1], pts[i]);
+    dist += d;
+    
+    // CLIMB DETECTION (> 8% grade)
+    const deltaEle = pts[i].ele - pts[i-1].ele;
+    if (d > 0.001) {
+      const grade = (deltaEle / (d * 1000)) * 100;
+      if (grade > 8) climbDist += d;
+    }
+  }
 
   let eleGain=0, eleLoss=0;
   const eles = pts.map(p=>p.ele||0);
@@ -449,6 +535,7 @@ function computeStats(pts) {
 
   return {
     distance: +dist.toFixed(2),
+    climbDist: +climbDist.toFixed(2),
     duration: dur,
     eleGain:  Math.round(eleGain),
     eleLoss:  Math.round(eleLoss),
@@ -481,19 +568,43 @@ function haversine(a,b) {
    VISIBILITY — selected vs all
 ═══════════════════════════════════════════════════════════════ */
 function visibleRides() {
-  // If a ride is selected, only show that one in stats/charts
-  if (selectedId) {
-    const r = rides.find(r=>r.id===selectedId);
-    return r ? [r] : [];
+  // If routes are selected, only show those
+  if (selectedIds.size > 0) {
+    return rides.filter(r => selectedIds.has(r.id));
   }
-  return rides.filter(r=>r.visible);
+  return rides.filter(r => r.visible);
 }
 
 function applyPolylineVisibility() {
   rides.forEach(r => {
-    const show = selectedId ? r.id===selectedId : r.visible;
-    if (show && !map.hasLayer(r.poly)) r.poly.addTo(map);
-    else if (!show && map.hasLayer(r.poly)) map.removeLayer(r.poly);
+    const show = selectedIds.size > 0 ? selectedIds.has(r.id) : r.visible;
+    if (show) {
+      if (!map.hasLayer(r.group)) r.group.addTo(map);
+      
+      // GHOSTING LOGIC
+      if (selectedIds.size > 1) {
+        const isPrimary = r.id === lastSelectedId;
+        r.poly.setStyle({
+          weight: isPrimary ? 4 : 2,
+          opacity: isPrimary ? 1 : 0.3,
+          dashArray: isPrimary ? null : '5, 10'
+        });
+        if (r.steepPolys) {
+          r.steepPolys.forEach(sp => sp.setStyle({
+            opacity: isPrimary ? 0.9 : 0.2
+          }));
+        }
+      } else {
+        r.poly.setStyle({
+          weight: 2.5,
+          opacity: 0.88,
+          dashArray: null
+        });
+        if (r.steepPolys) r.steepPolys.forEach(sp => sp.setStyle({opacity: 0.9}));
+      }
+    } else {
+      map.removeLayer(r.group);
+    }
   });
 }
 
@@ -506,14 +617,15 @@ function renderSidebar() {
   document.getElementById('sb-empty').style.display = rides.length ? 'none' : '';
 
   rides.forEach(r => {
-    const isSel = selectedId === r.id;
-    const isFad = selectedId && !isSel;
+    const isSel = selectedIds.has(r.id);
+    const isFad = selectedIds.size > 0 && !isSel;
     const el = document.createElement('div');
-    el.className = 'rc' + (isSel?' sel':'') + (!r.visible&&!selectedId?' fad':'') + (isFad?' fad':'');
+    el.className = 'rc' + (isSel?' sel':'') + (!r.visible&&selectedIds.size===0?' fad':'') + (isFad?' fad':'');
     el.style.setProperty('--rc', r.color);
-    el.onclick = () => selectRide(r.id);
+    el.onclick = (e) => selectRide(r.id, e);
     el.innerHTML = `
       <div class="rc-hd">
+        <input type="checkbox" ${isSel?'checked':''} onclick="event.stopPropagation(); selectRide('${r.id}', {ctrlKey:true, metaKey:true})">
         <div class="rc-dot"></div>
         <div class="rc-nm" title="${esc(r.name)}">${esc(r.name)}</div>
         <div class="rc-acts">
@@ -527,6 +639,7 @@ function renderSidebar() {
         <div class="rc-kv">⏱ <b>${fmtDur(r.stats.duration)}</b></div>
         <div class="rc-kv">📏 <b>${r.stats.distance} km</b></div>
         <div class="rc-kv">⬆ <b>${r.stats.eleGain} m</b></div>
+        <div class="rc-kv">⛰ <b>${r.stats.climbDist} km (&gt;8%)</b></div>
         ${r.stats.avgHr   ? `<div class="rc-kv">♥ <b>${r.stats.avgHr} bpm</b></div>` : ''}
         ${r.stats.avgSpeed? `<div class="rc-kv">⚡ <b>${r.stats.avgSpeed} km/h</b></div>` : ''}
       </div>`;
@@ -543,7 +656,7 @@ function renderSidebar() {
   });
 
   document.getElementById('chip-count').textContent = `${rides.length} ride${rides.length!==1?'s':''}`;
-  document.getElementById('chip-live').style.display  = rides.length>1 && !selectedId ? '' : 'none';
+  document.getElementById('chip-live').style.display  = rides.length>1 && selectedIds.size===0 ? '' : 'none';
   document.getElementById('rc-lbl').textContent = rides.length;
 }
 
@@ -564,6 +677,7 @@ function renderStats() {
 }
 
 function renderCompare(body, vis) {
+  const isCombined = selectedIds.size > 1;
   const metrics = [
     {k:'distance',  lbl:'Distance',        fmt:v=>v+' km',          hi:true},
     {k:'duration',  lbl:'Moving time',     fmt:fmtDur,              hi:false},
@@ -578,6 +692,13 @@ function renderCompare(body, vis) {
     {k:'avgPower',  lbl:'Avg power',       fmt:v=>v?v+' W':'—',     hi:true},
     {k:'tss',       lbl:'Training stress', fmt:v=>v||'—',           hi:false},
   ];
+
+  if (isCombined) {
+    const summary = document.createElement('div');
+    summary.className = 'insl';
+    summary.textContent = `Combined view: ${vis.length} rides`;
+    body.appendChild(summary);
+  }
 
   metrics.forEach(m => {
     const nums = vis.map(r=>parseFloat(r.stats[m.k])).filter(v=>!isNaN(v)&&v>0);
@@ -721,19 +842,23 @@ function setChart(type, btn) {
 
 function renderChart() {
   const canvas = document.getElementById('pc');
-  if (profileChart) { profileChart.destroy(); profileChart = null; }
-
   const vis = visibleRides();
-  if (!vis.length) return;
+  if (!vis.length) {
+    if (profileChart) { profileChart.destroy(); profileChart = null; }
+    const ctx = canvas.getContext('2d');
+    ctx.font = '12px "DM Mono", monospace';
+    ctx.fillStyle = '#5c6b5f';
+    ctx.textAlign = 'center';
+    ctx.fillText('Select a route to view elevation profile', canvas.width/2, canvas.height/2);
+    return;
+  }
 
   const KEY = {elevation:'ele', hr:'hr', speed:'speed', cadence:'cad', power:'power'};
   const UNITS = {elevation:' m', hr:' bpm', speed:' km/h', cadence:' rpm', power:' W'};
   const key   = KEY[currentChart] || 'ele';
 
-  // Check if any ride has this data
   const hasData = vis.some(r => r.points.some(p => p[key]!=null && p[key]>0));
   if (!hasData && currentChart !== 'elevation') {
-    // Show elevation as fallback with a note
     const fallbackKey = 'ele';
     renderChartWithKey(canvas, vis, fallbackKey, UNITS);
     toast('No '+currentChart+' data in selected rides — showing elevation', 'warn');
@@ -767,65 +892,79 @@ function renderChartWithKey(canvas, vis, key, UNITS) {
 
   if (!datasets.length) return;
 
-  profileChart = new Chart(canvas.getContext('2d'), {
-    type: 'line',
-    data: {datasets},
-    options: {
-      responsive: true, maintainAspectRatio: false,
-      animation: {duration:220},
-      interaction: {mode:'index', intersect:false},
-      onHover: (_evt, elements) => {
-        if (!elements.length) { hideHoverMarker(); return; }
-        const el = elements[0];
-        const ds = datasets[el.datasetIndex];
-        if (!ds) return;
-        const pt = ds.data[el.index];
-        if (!pt) return;
-        const ride = vis.find(r=>r.id===ds.rideId);
-        if (ride && pt.pi!=null) {
-          const origPt = ride.points[pt.pi];
-          if (origPt) showHoverMarker(origPt, ride.color, currentChart, pt.y);
-        }
-      },
-      plugins: {
-        legend:{display:false},
-        tooltip:{
-          backgroundColor:'#181c1a', borderColor:'rgba(255,255,255,.1)', borderWidth:1,
-          titleColor:'#5c6b5f', bodyColor:'#dfe8e0',
-          titleFont:{family:"'DM Mono',monospace",size:9},
-          bodyFont: {family:"'DM Mono',monospace",size:10},
-          padding:7,
-          callbacks:{
-            title: items => `${items[0].parsed.x.toFixed(1)}% of route`,
-            label: item => {
-              const v = item.parsed.y;
-              if (v==null) return null;
-              const unit = UNITS[currentChart]||'';
-              return ` ${item.dataset.label}: ${v.toFixed(0)}${unit}`;
-            },
+  if (profileChart) {
+    profileChart.data.datasets = datasets;
+    profileChart.update('none'); // Use 'none' for better performance
+  } else {
+    profileChart = new Chart(canvas.getContext('2d'), {
+      type: 'line',
+      data: {datasets},
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        animation: {duration: 150},
+        interaction: {mode:'index', intersect:false},
+        onHover: (_evt, elements) => {
+          if (!elements.length) { hideHoverMarker(); return; }
+          const el = elements[0];
+          const ds = datasets[el.datasetIndex];
+          if (!ds) return;
+          const pt = ds.data[el.index];
+          if (!pt) return;
+          const ride = vis.find(r=>r.id===ds.rideId);
+          if (ride && pt.pi!=null) {
+            const origPt = ride.points[pt.pi];
+            if (origPt) showHoverMarker(origPt, ride.color, currentChart, pt.y);
           }
+        },
+        plugins: {
+          legend:{display:false},
+          tooltip:{
+            backgroundColor:'#181c1a', borderColor:'rgba(255,255,255,.1)', borderWidth:1,
+            titleColor:'#5c6b5f', bodyColor:'#dfe8e0',
+            titleFont:{family:"'DM Mono',monospace",size:9},
+            bodyFont: {family:"'DM Mono',monospace",size:10},
+            padding:7,
+            callbacks:{
+              title: items => `${items[0].parsed.x.toFixed(1)}% of route`,
+              label: item => {
+                const v = item.parsed.y;
+                if (v==null) return null;
+                const unit = UNITS[currentChart]||'';
+                return ` ${item.dataset.label}: ${v.toFixed(0)}${unit}`;
+              },
+            }
+          }
+        },
+        scales:{
+          x:{type:'linear',min:0,max:100,
+            ticks:{color:'#5c6b5f',font:{family:"'DM Mono',monospace",size:9},callback:v=>v+'%',maxTicksLimit:6},
+            grid:{color:'rgba(255,255,255,.04)'}},
+          y:{ticks:{color:'#5c6b5f',font:{family:"'DM Mono',monospace",size:9},maxTicksLimit:5},
+             grid:{color:'rgba(255,255,255,.04)'}}
         }
-      },
-      scales:{
-        x:{type:'linear',min:0,max:100,
-          ticks:{color:'#5c6b5f',font:{family:"'DM Mono',monospace",size:9},callback:v=>v+'%',maxTicksLimit:6},
-          grid:{color:'rgba(255,255,255,.04)'}},
-        y:{ticks:{color:'#5c6b5f',font:{family:"'DM Mono',monospace",size:9},maxTicksLimit:5},
-           grid:{color:'rgba(255,255,255,.04)'}}
       }
-    }
-  });
-  canvas.addEventListener('mouseleave', hideHoverMarker);
+    });
+    canvas.addEventListener('mouseleave', hideHoverMarker);
+  }
 }
+
+
+
+
+
+
+      
+
 
 /* ═══════════════════════════════════════════════════════════════
    HOVER MARKER — chart → map sync
 ═══════════════════════════════════════════════════════════════ */
 function showHoverMarker(pt, color, type, value) {
   if (!pt?.lat || !pt?.lng) return;
+  const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
   hoverMarker.setIcon(L.divIcon({
     className:'',
-    html:`<div style="width:12px;height:12px;border-radius:50%;background:${color};border:2px solid #fff;box-shadow:0 0 0 2px rgba(0,0,0,.5);transform:translate(-6px,-6px)"></div>`,
+    html:`<div style="width:14px;height:14px;border-radius:50%;background:${color};border:3px solid ${isDark ? '#fff' : '#000'};box-shadow:0 0 0 2px ${isDark ? 'rgba(0,0,0,.7)' : 'rgba(255,255,255,.5)'};transform:translate(-7px,-7px)"></div>`,
     iconSize:[0,0],
   }));
   hoverMarker.setLatLng([pt.lat, pt.lng]);
@@ -1186,16 +1325,40 @@ function hydrate(r) {
   const pts   = r.points || [];
   // Convert ts strings back to Date objects
   pts.forEach(p => { if (p.ts && typeof p.ts==='string') p.ts = new Date(p.ts); });
-  const poly = L.polyline(pts.map(p=>[p.lat,p.lng]),{color,weight:2.5,opacity:.88,smoothFactor:1}).addTo(map);
+  const poly = L.polyline(pts.map(p=>[p.lat,p.lng]),{color,weight:2.5,opacity:.88,smoothFactor:1});
+  
+  // Restore climb segments
+  const steepPolys = [];
+  let currentClimb = [];
+  for (let i=1; i<pts.length; i++) {
+    const d = haversine(pts[i-1], pts[i]);
+    const deltaEle = pts[i].ele - pts[i-1].ele;
+    const grade = d > 0.001 ? (deltaEle / (d * 1000)) * 100 : 0;
+    if (grade > 8) {
+      if (currentClimb.length === 0) currentClimb.push(pts[i-1]);
+      currentClimb.push(pts[i]);
+    } else {
+      if (currentClimb.length > 0) {
+        steepPolys.push(L.polyline(currentClimb.map(p=>[p.lat,p.lng]), {color: '#ff4500', weight: 4, opacity: 0.9}));
+        currentClimb = [];
+      }
+    }
+  }
+  if (currentClimb.length > 0) {
+    steepPolys.push(L.polyline(currentClimb.map(p=>[p.lat,p.lng]), {color: '#ff4500', weight: 4, opacity: 0.9}));
+  }
+  const group = L.layerGroup([poly, ...steepPolys]).addTo(map);
+
   rides.push({
     id:r.id, name:r.name, color,
     points:pts, smap:buildSampleMap(pts),
     stats: r.stats || computeStats(pts),
     fileType:r.fileType||'gpx',
     laps: r.laps||[],
-    poly, visible:true,
+    poly, steepPolys, group, visible:true,
   });
 }
+
 
 /* ═══════════════════════════════════════════════════════════════
    MASTER REFRESH
@@ -1234,8 +1397,59 @@ function loader(show, msg='Processing…') {
 }
 
 /* ═══════════════════════════════════════════════════════════════
-   BOOT
+   THEME TOGGLE
 ═══════════════════════════════════════════════════════════════ */
+function toggleTheme() {
+  const html = document.documentElement;
+  const next = html.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+  html.setAttribute('data-theme', next);
+  localStorage.setItem('ridecomp_theme', next);
+  
+  const tile = next === 'dark' ? 'dark' : 'street';
+  const btn = document.querySelector('.mb.on') || document.querySelectorAll('.mb')[0];
+  setTile(tile, btn);
+  saveState();
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   STATE PERSISTENCE
+ ═══════════════════════════════════════════════════════════════ */
+function saveState() {
+  const state = {
+    theme: document.documentElement.getAttribute('data-theme'),
+    sbHidden: document.getElementById('sidebar').classList.contains('hidden'),
+    spHidden: document.getElementById('sp').classList.contains('hidden'),
+    sbCollapsed: document.getElementById('sidebar').classList.contains('sidebar-collapsed'),
+    spCollapsed: document.getElementById('sp').classList.contains('sidebar-collapsed'),
+    selectedIds: Array.from(selectedIds),
+    multiSelect: multiSelectMode
+  };
+  localStorage.setItem('ridecomp_state', JSON.stringify(state));
+}
+
+function loadState() {
+  const saved = localStorage.getItem('ridecomp_state');
+  if (!saved) return;
+  try {
+    const state = JSON.parse(saved);
+    if (state.theme) document.documentElement.setAttribute('data-theme', state.theme);
+    if (state.sbHidden) document.getElementById('sidebar').classList.add('hidden');
+    if (state.spHidden) document.getElementById('sp').classList.add('hidden');
+    if (state.sbCollapsed) document.getElementById('sidebar').classList.add('sidebar-collapsed');
+    if (state.spCollapsed) document.getElementById('sp').classList.add('sidebar-collapsed');
+    if (state.selectedIds) selectedIds = new Set(state.selectedIds);
+    if (state.multiSelect !== undefined) {
+      multiSelectMode = state.multiSelect;
+      const toggle = document.getElementById('multi-select-toggle');
+      if (toggle) toggle.checked = state.multiSelect;
+    }
+  } catch(e) { console.error('State load error', e); }
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   BOOT
+ ═══════════════════════════════════════════════════════════════ */
+
 window.addEventListener('DOMContentLoaded', async () => {
   // Restore theme
   const _t = localStorage.getItem('ridecomp_theme');
@@ -1280,10 +1494,63 @@ window.addEventListener('DOMContentLoaded', async () => {
   } catch(e) { console.warn('IndexedDB unavailable, running in-memory', e); idb=null; }
 
   refresh();
-  window.addEventListener('resize', ()=>{ if(profileChart) profileChart.resize(); });
+  
+  // Map auto-resize observer
+  const mapEl = document.getElementById('map');
+  if (mapEl) {
+    const ro = new ResizeObserver(() => {
+      if (map) map.invalidateSize();
+    });
+    ro.observe(mapEl);
+  }
+
+  loadState();
+  saveState();
+
+  // Debounced resize handler
+
+  let resizeTimer;
+  window.addEventListener('resize', () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => {
+      if (profileChart) profileChart.resize();
+    }, 150);
+  });
+
+  // Keyboard shortcuts
   document.addEventListener('keydown', e => {
+    // Ctrl/Cmd+O: Import files
     if ((e.ctrlKey||e.metaKey)&&e.key==='o') { e.preventDefault(); document.getElementById('fi').click(); }
-    if (e.key==='Escape') { closeSettings(); document.getElementById('admin-mb').style.display='none'; }
+    // Escape: Close modals/panels
+    if (e.key==='Escape') {
+      closeSettings();
+      document.getElementById('admin-mb').style.display='none';
+      closeAllPanels();
+    }
+    // Ctrl/Cmd+K: Toggle theme
+    if ((e.ctrlKey||e.metaKey)&&e.key==='k') { e.preventDefault(); toggleTheme(); }
+    // Ctrl/Cmd+S: Sync to Supabase
+    if ((e.ctrlKey||e.metaKey)&&e.key==='s') { e.preventDefault(); if(document.getElementById('btn-sync')?.style.display!=='none') syncToSupabase(); }
+    // Ctrl/Cmd+D: Clear all rides
+    if ((e.ctrlKey||e.metaKey)&&e.key==='d') { e.preventDefault(); if(rides.length) clearAll(); }
+    // ?: Open help (when not in input)
+    if (e.key==='?' && !['INPUT','TEXTAREA'].includes(document.activeElement?.tagName)) {
+      e.preventDefault();
+      openHelp();
+    }
+    // Arrow keys: Navigate rides (when sidebar focused)
+    if (e.key==='ArrowDown' && document.activeElement?.closest('#sidebar')) {
+      e.preventDefault();
+      const sel = document.querySelector('.rc.sel');
+      const next = sel?.nextElementSibling?.classList.contains('rc') ? sel.nextElementSibling : document.querySelector('.rc');
+      next?.click();
+    }
+    if (e.key==='ArrowUp' && document.activeElement?.closest('#sidebar')) {
+      e.preventDefault();
+      const sel = document.querySelector('.rc.sel');
+      const prev = sel?.previousElementSibling?.classList.contains('rc') ? sel.previousElementSibling : null;
+      prev?.click();
+    }
   });
 
   console.log(`RideComp v${VER} ready.`);

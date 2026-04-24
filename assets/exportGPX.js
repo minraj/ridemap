@@ -64,89 +64,83 @@ function renderSegments(body, vis) {
   }
   if (window._segLayers) { window._segLayers.forEach(l => map.removeLayer(l)); }
   window._segLayers = [];
-  let totalFound = 0;
+
+  // Collect all segments with metadata
+  const allSegs = [];
   for (let i = 0; i < vis.length; i++) {
     for (let j = i + 1; j < vis.length; j++) {
       const A = vis[i], B = vis[j];
       const segs = detectSharedSegments(A, B);
       segs.forEach((seg, k) => {
-        totalFound++;
-        const layer = L.polyline(seg.map(p => [p.lat, p.lng]), {color:'#ffffff', weight:4, opacity:.6, dashArray:'8 4'}).addTo(map);
-        window._segLayers.push(layer);
-        const distKm = seg.length > 1 ? haversine(seg[0], seg[seg.length-1]).toFixed(1) : '?';
-        const row = document.createElement('div'); row.className = 'seg-row';
-        row.innerHTML = '<div class="seg-dot" style="background:' + A.color + '"></div><div class="seg-dot" style="background:' + B.color + '"></div><div style="flex:1;font-size:10px">Seg ' + (k+1) + ': ' + esc(A.name) + ' ↔ ' + esc(B.name) + '</div><div style="font-size:9px;color:var(--mu)">' + distKm + ' km</div>';
-        row.onclick = () => map.fitBounds(layer.getBounds(), {padding:[30,30]});
-        body.appendChild(row);
+        const distKm = seg.length > 1 ? haversine(seg[0], seg[seg.length-1]) : 0;
+        // Calculate segment stats
+        const eles = seg.map(p => p.ele || 0);
+        const eleGain = eles.reduce((acc, e, i) => i === 0 ? acc : acc + Math.max(0, e - eles[i-1]), 0);
+        const hrs = seg.map(p => p.hr).filter(v => v > 30 && v < 250);
+        const spds = seg.map(p => p.speed).filter(v => v > 0 && v < 120);
+        allSegs.push({
+          rideA: A, rideB: B, segIndex: k, points: seg,
+          distance: distKm, eleGain,
+          avgHr: hrs.length ? hrs.reduce((a,b)=>a+b,0)/hrs.length : null,
+          avgSpeed: spds.length ? spds.reduce((a,b)=>a+b,0)/spds.length : null,
+        });
       });
     }
   }
+
+  // Sort by distance (longest first)
+  allSegs.sort((a, b) => b.distance - a.distance);
+
+  let totalFound = allSegs.length;
+  allSegs.forEach((s, idx) => {
+    const layer = L.polyline(s.points.map(p => [p.lat, p.lng]), {color:'#ffffff', weight:4, opacity:.6, dashArray:'8 4'}).addTo(map);
+    window._segLayers.push(layer);
+    const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+    const row = document.createElement('div'); row.className = 'seg-row';
+    const stats = [];
+    if (s.avgSpeed) stats.push(Math.round(s.avgSpeed)+' km/h');
+    if (s.avgHr) stats.push(Math.round(s.avgHr)+' bpm');
+    if (s.eleGain > 5) stats.push('↑'+Math.round(s.eleGain)+'m');
+    row.innerHTML = `
+      <div class="seg-dot" style="background:${s.rideA.color}"></div>
+      <div class="seg-dot" style="background:${s.rideB.color}"></div>
+      <div style="flex:1;font-size:10px">
+        <div style="font-weight:600;color:var(--tx)">Segment ${idx+1}</div>
+        <div style="color:var(--mu);font-size:9px">${esc(s.rideA.name)} ↔ ${esc(s.rideB.name)}</div>
+      </div>
+      <div style="text-align:right">
+        <div style="font-size:10px;color:var(--tx);font-weight:600">${s.distance.toFixed(1)} km</div>
+        ${stats.length ? '<div style="font-size:8px;color:var(--mu)">'+stats.join(' · ')+'</div>' : ''}
+      </div>`;
+    row.onclick = () => map.fitBounds(layer.getBounds(), {padding:[30,30]});
+    body.appendChild(row);
+    // Update segment style based on theme
+    layer.setStyle({
+      color: isDark ? '#ffffff' : '#333333',
+      weight: isDark ? 5 : 4,
+      opacity: isDark ? 0.85 : 0.7,
+      dashArray: isDark ? '6 6' : '8 4'
+    });
+  });
+
   if (totalFound === 0) {
     const el = document.createElement('div'); el.className = 'ins';
-    el.textContent = 'No shared sections found within 50m. Rides do not appear to overlap.';
+    el.innerHTML = 'No shared sections found within 50m. Rides do not appear to overlap on the same roads.';
     body.appendChild(el);
+  } else {
+    const summary = document.createElement('div');
+    summary.className = 'insl';
+    summary.textContent = `Found ${totalFound} shared segment${totalFound!==1?'s':''} (sorted by length)`;
+    body.insertBefore(summary, body.firstChild);
   }
 }
 
 /* ═══════════════════════════════════════════════════════════════
    LAP PARSING (FIT global msg 19)
-═══════════════════════════════════════════════════════════════ */
-function parseFITLaps(bytes, dv) {
-  const headerLen = bytes[0];
-  const dataSize  = dv.getUint32(4, true);
-  const fileEnd   = Math.min(headerLen + dataSize, bytes.length);
-  const defs = {}, laps = [];
-  let off = headerLen;
-  while (off < fileEnd - 1) {
-    if (off >= bytes.length) break;
-    const rh = bytes[off++];
-    const compressed = (rh & 0x80) !== 0;
-    const isDef = !compressed && (rh & 0x40) !== 0;
-    const hasDev = !compressed && (rh & 0x20) !== 0;
-    const localNum = compressed ? (rh >> 5) & 0x03 : (rh & 0x0F);
-    if (compressed) { const d = defs[localNum]; if (d) off += d.size; continue; }
-    if (isDef) {
-      if (off + 5 > bytes.length) break;
-      off++;
-      const le = bytes[off++] === 0;
-      const gmn = le ? dv.getUint16(off,true) : dv.getUint16(off,false); off += 2;
-      const nf = bytes[off++]; const fields = []; let size = 0;
-      for (let i = 0; i < nf; i++) { if (off+3>bytes.length) break; fields.push({fd:bytes[off],fs:bytes[off+1],bt:bytes[off+2]}); size+=bytes[off+1]; off+=3; }
-      if (hasDev) { const nd = bytes[off++]; for (let i=0;i<nd;i++){if(off+3>bytes.length)break;size+=bytes[off+1];off+=3;} }
-      defs[localNum] = {gmn, fields, size, le};
-    } else {
-      const d = defs[localNum];
-      if (!d) { off++; continue; }
-      if (d.gmn === 19) {
-        let fo = off; const p = {};
-        for (const {fd,fs,bt} of d.fields) {
-          if (fo+fs>bytes.length) break;
-          p[fd] = readVal(dv, bytes, fo, fs, bt, d.le); fo += fs;
-        }
-        const lap = {
-          totalTime: p[9]  != null ? p[9]/1000   : null,
-          distance:  p[7]  != null ? p[7]/100000  : null,
-          avgHr:     (p[16]!= null && p[16]<250)  ? p[16] : null,
-          avgCad:    (p[18]!= null && p[18]<220)  ? p[18] : null,
-          avgSpeed:  p[13] != null ? Math.round(p[13]/1000*3.6*10)/10 : null,
-        };
-        if (lap.totalTime && lap.totalTime > 5) laps.push(lap);
-      }
-      off += d.size;
-    }
-  }
-  return laps;
-}
+ ═══════════════════════════════════════════════════════════════ */
+// (Removed parseFITLaps)
 
-/* ═══════════════════════════════════════════════════════════════
-   THEME TOGGLE
-═══════════════════════════════════════════════════════════════ */
-function toggleTheme() {
-  const html = document.documentElement;
-  const next = html.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
-  html.setAttribute('data-theme', next);
-  localStorage.setItem('ridecomp_theme', next);
-}
+
 
 /* ═══════════════════════════════════════════════════════════════
    MOBILE PANEL TOGGLE
@@ -154,7 +148,27 @@ function toggleTheme() {
 function toggleMobPanel(id) {
   const el    = document.getElementById(id);
   const other = id === 'sidebar' ? 'sp' : 'sidebar';
-  el.classList.toggle('mob-open');
-  document.getElementById(other).classList.remove('mob-open');
+  const isOpen = el.classList.contains('mob-open');
+  // Close all first
+  closeAllPanels();
+  // If it was closed, open it
+  if (!isOpen) {
+    el.classList.add('mob-open');
+    document.getElementById('mob-overlay').classList.add('mob-open');
+  }
+}
+function closeAllPanels() {
+  document.getElementById('sidebar').classList.remove('mob-open');
+  document.getElementById('sp').classList.remove('mob-open');
+  document.getElementById('mob-overlay').classList.remove('mob-open');
+}
+
+function openHelp() {
+  document.getElementById('help-mb').style.display = 'flex';
+}
+function closeHelpBg(e) {
+  if (e.target === document.getElementById('help-mb')) {
+    document.getElementById('help-mb').style.display = 'none';
+  }
 }
 

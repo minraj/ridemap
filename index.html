@@ -13,7 +13,10 @@
   <link rel="preconnect" href="https://fonts.googleapis.com"/>
   <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Mono:ital,wght@0,300;0,400;0,500;1,300&display=swap" rel="stylesheet"/>
   <link rel="stylesheet" href="assets/style.css"/>
+  <!-- in <head>, after style.css -->
+  <link rel="stylesheet" href="assets/ridemap-patch.css"/>
 
+  
 </head>
 <body>
 <div id="app">
@@ -32,6 +35,7 @@
     <button class="btn ghost" id="btn-mob-sb" style="padding:4px 8px;display:none" onclick="toggleMobPanel('sidebar')">☰</button>
     <button class="btn ghost" id="btn-mob-st" style="padding:4px 8px;display:none" onclick="toggleMobPanel('sp')">📊</button>
     <button class="btn ghost" title="Toggle light/dark" onclick="toggleTheme()">◑</button>
+    <button class="btn ghost" title="Keyboard shortcuts (?)" onclick="openHelp()">⌨</button>
     <button class="btn ghost" onclick="openSettings()">⚙ Settings</button>
     <button class="btn" id="btn-sync" style="display:none" onclick="syncToSupabase()">↑ Sync</button>
     <button class="btn" onclick="clearAll()">Clear</button>
@@ -45,10 +49,18 @@
 
   <!-- SIDEBAR -->
   <div id="sidebar">
+    <button class="collapse-btn" onclick="this.parentElement.classList.toggle('sidebar-collapsed')" title="Collapse Sidebar">&gt;</button>
+    <button class="toggle-btn" onclick="this.parentElement.classList.toggle('hidden')" title="Toggle Sidebar">◀</button>
+    <button class="btn ghost mob-close" onclick="toggleMobPanel('sidebar')" title="Close">✕</button>
     <div class="ph">
-      <span class="pt">Rides</span>
-      <span id="rc-lbl" style="font-size:10px;color:var(--mu)">0</span>
-      <button class="btn ghost" style="padding:3px 7px;font-size:10px" onclick="showAllRides()" title="Show all rides">All</button>
+      <div style="display:flex; align-items:center; gap:8px; width:100%; margin-bottom:8px">
+        <span class="pt">Rides</span>
+        <span id="rc-lbl" style="font-size:10px;color:var(--mu)">0</span>
+        <button class="btn ghost" style="padding:3px 7px;font-size:10px" onclick="showAllRides()" title="Show all rides">All</button>
+        <div style="margin-left:auto; display:flex; align-items:center; gap:5px; font-size:10px; color:var(--tx2)">
+          <input type="checkbox" id="multi-select-toggle" onchange="toggleMultiSelect(this.checked)"> Multi
+        </div>
+      </div>
     </div>
     <div id="rides-list">
       <div id="sb-empty" class="empty">
@@ -95,6 +107,9 @@
 
   <!-- STATS PANEL -->
   <div id="sp">
+    <button class="collapse-btn" onclick="this.parentElement.classList.toggle('sidebar-collapsed')" title="Collapse Stats">&lt;</button>
+    <button class="toggle-btn" onclick="this.parentElement.classList.toggle('hidden')" title="Toggle Stats">▶</button>
+    <button class="btn ghost mob-close" onclick="toggleMobPanel('sp')" title="Close">✕</button>
     <div class="stabs">
       <div class="stab on" onclick="setTab('compare',this)">Compare</div>
       <div class="stab" onclick="setTab('vitals',this)">Vitals</div>
@@ -112,6 +127,9 @@
 
 </div><!-- /main -->
 </div><!-- /app -->
+
+<!-- Mobile overlay -->
+<div class="mob-overlay" id="mob-overlay" onclick="closeAllPanels()"></div>
 
 <!-- SETTINGS / AUTH MODAL -->
 <div id="mb" onclick="closeModalBg(event)">
@@ -207,13 +225,36 @@
 </div>
 </div>
 
+<!-- HELP MODAL -->
+<div id="help-mb" onclick="closeHelpBg(event)" style="position:fixed;inset:0;background:rgba(0,0,0,.72);z-index:810;display:none;align-items:center;justify-content:center;backdrop-filter:blur(4px)">
+<div class="modal" style="width:420px">
+  <div class="mt">Keyboard Shortcuts</div>
+  <div class="ms">Quick keys to speed up your workflow.</div>
+  <div class="fr">
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:11px">
+      <div style="display:flex;gap:6px;align-items:center"><kbd style="background:var(--bg4);padding:2px 6px;border-radius:3px;border:1px solid var(--ln)">Ctrl+O</kbd> Import rides</div>
+      <div style="display:flex;gap:6px;align-items:center"><kbd style="background:var(--bg4);padding:2px 6px;border-radius:3px;border:1px solid var(--ln)">Ctrl+K</kbd> Toggle theme</div>
+      <div style="display:flex;gap:6px;align-items:center"><kbd style="background:var(--bg4);padding:2px 6px;border-radius:3px;border:1px solid var(--ln)">Ctrl+S</kbd> Sync to cloud</div>
+      <div style="display:flex;gap:6px;align-items:center"><kbd style="background:var(--bg4);padding:2px 6px;border-radius:3px;border:1px solid var(--ln)">Ctrl+D</kbd> Clear all</div>
+      <div style="display:flex;gap:6px;align-items:center"><kbd style="background:var(--bg4);padding:2px 6px;border-radius:3px;border:1px solid var(--ln)">Esc</kbd> Close modals</div>
+      <div style="display:flex;gap:6px;align-items:center"><kbd style="background:var(--bg4);padding:2px 6px;border-radius:3px;border:1px solid var(--ln)">↑↓</kbd> Navigate rides</div>
+    </div>
+  </div>
+  <div class="ma">
+    <button class="btn ghost" onclick="document.getElementById('help-mb').style.display='none'">Close</button>
+  </div>
+</div>
+</div>
+
 <!-- LOADER -->
 <div id="ldr"><div class="ls"></div><div class="lm" id="lm">Processing…</div></div>
 <!-- TOAST -->
 <div id="toast"></div>
 
-<script src="assets/script.js"/>
+<script src="assets/script.js"></script>
+
 <script src="assets/exportGPX.js"></script>
+<script src="assets/ridemap-patch.js"></script>
 
 </body>
 </html>

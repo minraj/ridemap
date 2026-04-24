@@ -1,0 +1,109 @@
+/* ═══════════════════════════════════════════════════════════════════
+   ridemap-patch.css  —  resizable + collapsible panels
+   Works with the existing style.css variables (--bg2, --acc, etc.)
+   ═══════════════════════════════════════════════════════════════════ */
+
+/* ── Make panels clipping-friendly for absolute children ─── */
+#sidebar, #sp, #cs {
+  position: relative !important;
+  overflow: hidden !important;
+}
+#sidebar > *,
+#sp      > *,
+#cs      > * {
+  /* Inner content flows naturally */
+}
+
+/* ── Resize handles ──────────────────────────────────────── */
+.rm-rh {
+  position:   absolute;
+  z-index:    450;
+  background: transparent;
+  transition: background .12s;
+  flex-shrink: 0;
+}
+.rm-rh:hover, .rm-rh.rm-drag {
+  background: var(--acc);
+  opacity: .55;
+}
+/* Vertical (left↔right) */
+.rm-rh.rm-v { top:0; bottom:0; width:6px; cursor:col-resize; }
+/* Horizontal (up↕down) */
+.rm-rh.rm-h { left:0; right:0; height:6px; cursor:row-resize; }
+
+/* Exact positioning */
+#rm-sb-rh  { right: -3px; top: 0; }   /* sidebar right edge  */
+#rm-sp-rh  { left:  -3px; top: 0; }   /* stats panel left edge */
+#rm-cs-rh  { top:   -3px; left: 0; }  /* chart bar top edge   */
+
+/* ── Toggle buttons ──────────────────────────────────────── */
+.rm-toggle {
+  position:        absolute;
+  z-index:         500;
+  display:         flex;
+  align-items:     center;
+  justify-content: center;
+  background:      var(--bg3);
+  border:          1px solid var(--ln2);
+  color:           var(--mu);
+  cursor:          pointer;
+  user-select:     none;
+  font-size:       10px;
+  line-height:     1;
+  transition:      background .12s, color .12s, border-color .12s, opacity .12s;
+}
+.rm-toggle:hover {
+  background:   var(--acc);
+  color:        var(--bg);
+  border-color: var(--acc);
+}
+
+/* Sidebar toggle — right edge, centred vertically */
+#rm-sb-tog {
+  right: -16px; top: 50%; transform: translateY(-50%);
+  width: 16px; height: 44px;
+  border-left: none;
+  border-radius: 0 var(--rad) var(--rad) 0;
+}
+
+/* Stats panel toggle — left edge, centred vertically */
+#rm-sp-tog {
+  left: -16px; top: 50%; transform: translateY(-50%);
+  width: 16px; height: 44px;
+  border-right: none;
+  border-radius: var(--rad) 0 0 var(--rad);
+}
+
+/* Chart bar toggle — top edge, centred horizontally */
+#rm-cs-tog {
+  top: -16px; left: 50%; transform: translateX(-50%);
+  width: 44px; height: 16px;
+  border-bottom: none;
+  border-radius: var(--rad) var(--rad) 0 0;
+  font-size: 9px;
+}
+
+/* ── Collapsed state ───────────────────────────────────── */
+#sidebar.rm-col  { width:  0 !important; min-width: 0 !important; border: none !important; }
+#sp.rm-col       { width:  0 !important; min-width: 0 !important; border: none !important; }
+#cs.rm-col       { height: 0 !important; min-height: 0 !important; border: none !important; }
+
+/* Keep toggles visible even when collapsed */
+#sidebar.rm-col .rm-toggle,
+#sp.rm-col      .rm-toggle,
+#cs.rm-col      .rm-toggle {
+  pointer-events: auto;
+}
+
+/* ── Smooth panel resize ──────────────────────────────── */
+#sidebar { transition: width  .18s ease; }
+#sp      { transition: width  .18s ease; }
+#cs      { transition: height .18s ease; }
+
+/* Pause transition while dragging for snappy feel */
+#sidebar.rm-drag-active,
+#sp.rm-drag-active,
+#cs.rm-drag-active { transition: none !important; }
+
+/* ── Halo layers sit below tracks in Leaflet SVG ─────── */
+.rm-halo { pointer-events: none !important; }
