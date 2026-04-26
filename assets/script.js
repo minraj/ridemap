@@ -903,9 +903,18 @@ function renderChartWithKey(canvas, vis, key, UNITS) {
         responsive: true, maintainAspectRatio: false,
         animation: {duration: 150},
         interaction: {mode:'index', intersect:false},
-        onHover: (_evt, elements) => {
+        onHover: (evt, elements) => {
           if (!elements.length) { hideHoverMarker(); return; }
-          const el = elements[0];
+          // With mode:'index', elements contains one entry per dataset at the same
+          // x-position. elements[0] always points to the first dataset (Route A),
+          // so we must find the element whose rendered y-pixel is closest to the
+          // mouse cursor — that is the line the user is actually hovering over.
+          const mouseY = evt.native?.offsetY ?? (evt.y ?? 0);
+          const el = elements.reduce((closest, cur) => {
+            const curDist  = Math.abs(cur.element.y  - mouseY);
+            const bestDist = Math.abs(closest.element.y - mouseY);
+            return curDist < bestDist ? cur : closest;
+          });
           const ds = datasets[el.datasetIndex];
           if (!ds) return;
           const pt = ds.data[el.index];
@@ -964,7 +973,8 @@ function showHoverMarker(pt, color, type, value) {
   const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
   hoverMarker.setIcon(L.divIcon({
     className:'',
-    html:`<div style="width:14px;height:14px;border-radius:50%;background:${color};border:3px solid ${isDark ? '#fff' : '#000'};box-shadow:0 0 0 2px ${isDark ? 'rgba(0,0,0,.7)' : 'rgba(255,255,255,.5)'};transform:translate(-7px,-7px)"></div>`,
+    // Outer ring uses the route color so it's visually obvious which route is traced.
+    html:`<div style="width:14px;height:14px;border-radius:50%;background:${color};border:3px solid ${isDark ? '#fff' : '#000'};box-shadow:0 0 0 3px ${color},0 0 6px 3px ${color}55;transform:translate(-7px,-7px)"></div>`,
     iconSize:[0,0],
   }));
   hoverMarker.setLatLng([pt.lat, pt.lng]);
