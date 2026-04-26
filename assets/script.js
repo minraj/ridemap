@@ -1,6 +1,7 @@
+'use strict';
 /* ═══════════════════════════════════════════════════════════════
    CONSTANTS
-═══════════════════════════════════════════════════════════════ */
+ ═══════════════════════════════════════════════════════════════ */
 const VER = '1.4.0';
 const IDB_NAME = 'ridecomp_v1';
 const IDB_STORE = 'rides';
@@ -29,7 +30,9 @@ let currentChart = 'elevation';
 let currentTab   = 'compare';
 let sbClient     = null;
 let idb          = null;
-let cfg          = {url:'https://exnqyuwqfvbmakojirua.supabase.co', key:'sb_publishable_AO2On8ZzClh-gma3_OIwiA_RIFPoOYQ', maxHR:190, uid:'local'};
+let _haloLayers = [];
+window._segLayers = [];
+let cfg          = {url: CONFIG.supabaseUrl, key: CONFIG.supabaseKey, maxHR:190, uid:'local'};
 let currentUser  = null;
 let pendingSync  = new Set();
 
@@ -85,10 +88,10 @@ function setTileLayer(name) {
   const isLight = name === 'topo' || name === 'street';
 
   // Remove previous halo layers
-  if (window._haloLayers) {
-    window._haloLayers.forEach(l => { try { map.removeLayer(l); } catch(_){} });
+  if (_haloLayers.length) {
+    _haloLayers.forEach(l => { try { map.removeLayer(l); } catch(_){} });
   }
-  window._haloLayers = [];
+  _haloLayers = [];
 
   rides.forEach(r => {
     if (!map.hasLayer(r.poly)) return;
@@ -101,16 +104,15 @@ function setTileLayer(name) {
     });
     if (isLight) {
       // White halo beneath the coloured track for contrast on pale backgrounds
-      const halo = L.polyline(r.poly.getLatLngs(), {
-        color: '#ffffff', weight: 11, opacity: 0.65, interactive: false
-      }).addTo(map);
-      window._haloLayers.push(halo);
-      r.poly.bringToFront();
+       const halo = L.polyline(r.poly.getLatLngs(), {
+         color: '#ffffff', weight: 11, opacity: 0.65, interactive: false
+       }).addTo(map);
+       _haloLayers.push(halo);
+       r.poly.bringToFront();
     }
   });
 }
 
-// (Remove brightenColor function)
 function setTile(name, btn) {
   setTileLayer(name);
   currentTile = name;
@@ -346,19 +348,7 @@ function onDrop(e)      { e.preventDefault(); document.getElementById('dz').clas
 /* ═══════════════════════════════════════════════════════════════
    RIDE MANAGEMENT
 ═══════════════════════════════════════════════════════════════ */
-function addRide(name, points, fileType, laps) {
-  if (!fileType) fileType = 'gpx';
-  if (!laps) laps = [];
-  if (rides.find(r => r.name === name)) { toast('"'+name+'" already loaded', 'warn'); return; }
-
-  const id    = 'r_'+Date.now()+'_'+Math.random().toString(36).slice(2,6);
-  const color = COLORS[rides.length % COLORS.length];
-  const stats = computeStats(points);
-  const smap  = buildSampleMap(points);
-
-  const poly = L.polyline(points.map(p=>[p.lat,p.lng]), {color, weight:2.5, opacity:.88, smoothFactor:1});
-  
-  // Climb segments
+function buildClimbPolylines(points) {
   const steepPolys = [];
   let currentClimb = [];
   for (let i=1; i<points.length; i++) {
@@ -378,6 +368,22 @@ function addRide(name, points, fileType, laps) {
   if (currentClimb.length > 0) {
     steepPolys.push(L.polyline(currentClimb.map(p=>[p.lat,p.lng]), {color: '#ff4500', weight: 4, opacity: 0.9}));
   }
+  return steepPolys;
+}
+
+function addRide(name, points, fileType, laps) {
+  if (!fileType) fileType = 'gpx';
+  if (!laps) laps = [];
+  if (rides.find(r => r.name === name)) { toast('"'+name+'" already loaded', 'warn'); return; }
+
+  const id    = 'r_'+Date.now()+'_'+Math.random().toString(36).slice(2,6);
+  const color = COLORS[rides.length % COLORS.length];
+  const stats = computeStats(points);
+  const smap  = buildSampleMap(points);
+
+  const poly = L.polyline(points.map(p=>[p.lat,p.lng]), {color, weight:2.5, opacity:.88, smoothFactor:1});
+  
+  const steepPolys = buildClimbPolylines(points);
   const group = L.layerGroup([poly, ...steepPolys]).addTo(map);
 
   const ride = {id, name, color, points, smap, stats, fileType, laps, poly, steepPolys, group, visible:true};
@@ -398,11 +404,11 @@ function buildSampleMap(points) {
   // Adaptive sampling: more points for shorter rides, fewer for long ones
   const target = n < 200 ? n : n < 2000 ? Math.min(n, 400) : Math.min(n, 250);
   const step = n / target;
-  const map = [];
+  const sampleMap = [];
   for (let i = 0; i < target; i++) {
-    map.push(Math.min(Math.floor(i * step), n - 1));
+    sampleMap.push(Math.min(Math.floor(i * step), n - 1));
   }
-  return map;
+  return sampleMap;
 }
 
 async function removeRide(id, e) {
@@ -466,7 +472,7 @@ function showAllRides() {
 
   selectedIds.clear();
   // Show all polylines
-  rides.forEach(r => { r.visible = true; if (!map.hasLayer(r.poly)) r.poly.addTo(map); });
+  rides.forEach(r => { r.visible = true; if (!map.hasLayer(r.group)) r.group.addTo(map); });
   refresh();
 }
 
@@ -515,8 +521,8 @@ function computeStats(pts) {
   const pows = pts.map(p=>p.power).filter(v=>v>0&&v<2500);
 
   const avg = a => a.length ? a.reduce((x,y)=>x+y,0)/a.length : null;
-  const max = a => a.length ? Math.max(...a) : null;
-  const min = a => a.length ? Math.min(...a) : null;
+  const max = a => a.length ? a.reduce((m,v) => v > m ? v : m, -Infinity) : null;
+  const min = a => a.length ? a.reduce((m,v) => v < m ? v : m, Infinity) : null;
 
   // HR zones
   const maxHR = cfg.maxHR || 190;
@@ -561,7 +567,7 @@ function computeStats(pts) {
 function haversine(a,b) {
   const R=6371, dLat=(b.lat-a.lat)*Math.PI/180, dLon=(b.lng-a.lng)*Math.PI/180;
   const x=Math.sin(dLat/2)**2+Math.cos(a.lat*Math.PI/180)*Math.cos(b.lat*Math.PI/180)*Math.sin(dLon/2)**2;
-  return R*2*Math.atan2(Math.sqrt(x),Math.sqrt(1-x));
+  return R*2*Math.atan2(Math.sqrt(x),Math.sqrt(Math.max(0,1-x)));
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -625,13 +631,13 @@ function renderSidebar() {
     el.onclick = (e) => selectRide(r.id, e);
     el.innerHTML = `
       <div class="rc-hd">
-        <input type="checkbox" ${isSel?'checked':''} onclick="event.stopPropagation(); selectRide('${r.id}', {ctrlKey:true, metaKey:true})">
+        <input type="checkbox" class="rc-cb" ${isSel?'checked':''}>
         <div class="rc-dot"></div>
         <div class="rc-nm" title="${esc(r.name)}">${esc(r.name)}</div>
         <div class="rc-acts">
-          <button class="ibb" title="${r.visible?'Hide':'Show'}" onclick="toggleVis('${r.id}',event)">${r.visible?'👁':'○'}</button>
-          <button class="ibb" title="Zoom to route" onclick="zoomTo('${r.id}',event)">⊕</button>
-          <button class="ibb rm" title="Remove" onclick="removeRide('${r.id}',event)">✕</button>
+          <button class="ibb rc-vis" title="${r.visible?'Hide':'Show'}">${r.visible?'👁':'○'}</button>
+          <button class="ibb rc-zoom" title="Zoom to route">⊕</button>
+          <button class="ibb rm rc-rem" title="Remove">✕</button>
         </div>
       </div>
       <div class="rc-grid">
@@ -643,7 +649,15 @@ function renderSidebar() {
         ${r.stats.avgHr   ? `<div class="rc-kv">♥ <b>${r.stats.avgHr} bpm</b></div>` : ''}
         ${r.stats.avgSpeed? `<div class="rc-kv">⚡ <b>${r.stats.avgSpeed} km/h</b></div>` : ''}
       </div>`;
-    // Lap table (max 5 laps from FIT file)
+
+    el.querySelector('.rc-cb').onclick = (e) => {
+      e.stopPropagation();
+      selectRide(r.id, {ctrlKey:true, metaKey:true});
+    };
+    el.querySelector('.rc-vis').onclick = (e) => toggleVis(r.id, e);
+    el.querySelector('.rc-zoom').onclick = (e) => zoomTo(r.id, e);
+    el.querySelector('.rc-rem').onclick = (e) => removeRide(r.id, e);
+
     if (r.laps && r.laps.length) {
       const lapDiv = document.createElement('div');
       lapDiv.innerHTML = '<div class="lap-hdr"><span>Lap</span><span>Time</span><span>Dist</span><span>HR</span><span>Spd</span></div>' +
@@ -663,7 +677,7 @@ function renderSidebar() {
 /* ═══════════════════════════════════════════════════════════════
    RENDER STATS PANEL
 ═══════════════════════════════════════════════════════════════ */
-function renderStats() {
+async function renderStats() {
   const body = document.getElementById('sb');
   body.querySelectorAll('.sblk,.vsec,.ins,.insl').forEach(el=>el.remove());
   const vis = visibleRides();
@@ -673,7 +687,7 @@ function renderStats() {
   if (currentTab==='compare') renderCompare(body, vis);
   else if (currentTab==='vitals') renderVitals(body, vis);
   else if (currentTab==='plan') renderPlan(body, vis);
-  else if (currentTab==='segments') renderSegments(body, vis);
+  else if (currentTab==='segments') await renderSegments(body, vis);
 }
 
 function renderCompare(body, vis) {
@@ -819,15 +833,15 @@ function renderPlan(body, vis) {
   });
 }
 
-function setTab(tab, btn) {
+async function setTab(tab, btn) {
   currentTab = tab;
-  if (tab !== 'segments' && window._segLayers) {
-    window._segLayers.forEach(l => map.removeLayer(l));
-    window._segLayers = [];
+  if (tab !== 'segments' && _segLayers) {
+    _segLayers.forEach(l => map.removeLayer(l));
+    _segLayers = [];
   }
   document.querySelectorAll('.stab').forEach(b=>b.classList.remove('on'));
   btn.classList.add('on');
-  renderStats();
+  await renderStats();
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -870,13 +884,16 @@ function renderChart() {
 
 function renderChartWithKey(canvas, vis, key, UNITS) {
   const datasets = vis.map(r => {
+    const cacheKey = `chart_${key}`;
+    if (r._cache && r._cache[cacheKey]) return r._cache[cacheKey];
+
     const idxs = r.smap;
     const data = idxs.map(i => {
       const v = r.points[i][key];
       const valid = v != null && (key==='ele' ? true : v > 0);
       return {x: i/(r.points.length-1||1)*100, y: valid ? v : null, pi: i};
     });
-    return {
+    const ds = {
       label: r.name,
       data,
       borderColor: r.color,
@@ -888,7 +905,11 @@ function renderChartWithKey(canvas, vis, key, UNITS) {
       spanGaps: true,
       rideId: r.id,
     };
+    if (!r._cache) r._cache = {};
+    r._cache[cacheKey] = ds;
+    return ds;
   }).filter(ds => ds.data.some(d=>d.y!=null));
+
 
   if (!datasets.length) return;
 
@@ -1001,15 +1022,20 @@ function hideHoverMarker() {
 /* ═══════════════════════════════════════════════════════════════
    AUTH — Supabase OAuth + email/password + registration flow
 ═══════════════════════════════════════════════════════════════ */
-async function authWith(provider) {
+function ensureSupabaseClient() {
   if (!sbClient) {
     try {
       sbClient = window.supabase.createClient(cfg.url, cfg.key);
     } catch(e) {
       toast('Supabase initialization failed', 'err');
-      return;
+      return null;
     }
   }
+  return sbClient;
+}
+
+async function authWith(provider) {
+  if (!ensureSupabaseClient()) return;
   try {
     const {error} = await sbClient.auth.signInWithOAuth({
       provider,
@@ -1020,14 +1046,7 @@ async function authWith(provider) {
 }
 
 async function signInPassword() {
-  if (!sbClient) {
-    try {
-      sbClient = window.supabase.createClient(cfg.url, cfg.key);
-    } catch(e) {
-      toast('Supabase initialization failed', 'err');
-      return;
-    }
-  }
+  if (!ensureSupabaseClient()) return;
   const email = document.getElementById('reg-email').value.trim();
   const pass  = document.getElementById('reg-pass').value;
   if (!email||!pass) { toast('Enter email and password', 'err'); return; }
@@ -1040,14 +1059,7 @@ async function signInPassword() {
 }
 
 async function requestAccess() {
-  if (!sbClient) {
-    try {
-      sbClient = window.supabase.createClient(cfg.url, cfg.key);
-    } catch(e) {
-      toast('Supabase initialization failed', 'err');
-      return;
-    }
-  }
+  if (!ensureSupabaseClient()) return;
   const name  = document.getElementById('reg-name').value.trim();
   const email = document.getElementById('reg-email').value.trim();
   const pass  = document.getElementById('reg-pass').value;
@@ -1248,7 +1260,6 @@ async function syncToSupabase() {
   if (!sbClient) { toast('Configure Supabase in Settings first','err'); return; }
   if (!currentUser) { toast('Please sign in to sync rides','err'); return; }
   const toSync = rides.filter(r=>pendingSync.has(r.id));
-  console.log('Sync debug:', { totalRides: rides.length, pendingSync: pendingSync.size, toSync: toSync.length, userId: currentUser?.id });
   if (!toSync.length) {
     // If no pending but rides exist, mark all for sync
     if (rides.length > 0) {
@@ -1273,11 +1284,9 @@ async function syncToSupabase() {
         stats:r.stats,
         color:r.color
       };
-      console.log('Upserting ride:', payload);
-      const {data, error} = await sbClient.from('ridecomp_rides').upsert(payload);
-      if (error) throw error;
-      console.log('Upsert result:', data);
-      pendingSync.delete(r.id); ok++;
+       const {data, error} = await sbClient.from('ridecomp_rides').upsert(payload);
+       if (error) throw error;
+       pendingSync.delete(r.id); ok++;
     } catch(e) {
       fail++;
       console.error('Sync error for ride', r.id, e);
@@ -1318,6 +1327,9 @@ function importJSON(input) {
       toast(`Imported ${added} ride(s)`, 'ok');
     } catch(e) { toast('Import failed: '+e.message,'err'); }
     loader(false); input.value='';
+  }).catch(e => {
+    toast('File read error: ' + e.message, 'err');
+    loader(false);
   });
 }
 async function nukeDB() {
@@ -1337,26 +1349,7 @@ function hydrate(r) {
   pts.forEach(p => { if (p.ts && typeof p.ts==='string') p.ts = new Date(p.ts); });
   const poly = L.polyline(pts.map(p=>[p.lat,p.lng]),{color,weight:2.5,opacity:.88,smoothFactor:1});
   
-  // Restore climb segments
-  const steepPolys = [];
-  let currentClimb = [];
-  for (let i=1; i<pts.length; i++) {
-    const d = haversine(pts[i-1], pts[i]);
-    const deltaEle = pts[i].ele - pts[i-1].ele;
-    const grade = d > 0.001 ? (deltaEle / (d * 1000)) * 100 : 0;
-    if (grade > 8) {
-      if (currentClimb.length === 0) currentClimb.push(pts[i-1]);
-      currentClimb.push(pts[i]);
-    } else {
-      if (currentClimb.length > 0) {
-        steepPolys.push(L.polyline(currentClimb.map(p=>[p.lat,p.lng]), {color: '#ff4500', weight: 4, opacity: 0.9}));
-        currentClimb = [];
-      }
-    }
-  }
-  if (currentClimb.length > 0) {
-    steepPolys.push(L.polyline(currentClimb.map(p=>[p.lat,p.lng]), {color: '#ff4500', weight: 4, opacity: 0.9}));
-  }
+  const steepPolys = buildClimbPolylines(pts);
   const group = L.layerGroup([poly, ...steepPolys]).addTo(map);
 
   rides.push({
@@ -1373,11 +1366,15 @@ function hydrate(r) {
 /* ═══════════════════════════════════════════════════════════════
    MASTER REFRESH
 ═══════════════════════════════════════════════════════════════ */
-function refresh() {
-  applyPolylineVisibility();
-  renderSidebar();
-  renderStats();
-  renderChart();
+let _refreshTimer;
+async function refresh() {
+  clearTimeout(_refreshTimer);
+  _refreshTimer = setTimeout(async () => {
+    applyPolylineVisibility();
+    renderSidebar();
+    await renderStats();
+    renderChart();
+  }, 16);
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -1447,7 +1444,10 @@ function loadState() {
     if (state.spHidden) document.getElementById('sp').classList.add('hidden');
     if (state.sbCollapsed) document.getElementById('sidebar').classList.add('sidebar-collapsed');
     if (state.spCollapsed) document.getElementById('sp').classList.add('sidebar-collapsed');
-    if (state.selectedIds) selectedIds = new Set(state.selectedIds);
+    if (state.selectedIds) {
+      selectedIds.clear();
+      state.selectedIds.forEach(id => selectedIds.add(id));
+    }
     if (state.multiSelect !== undefined) {
       multiSelectMode = state.multiSelect;
       const toggle = document.getElementById('multi-select-toggle');

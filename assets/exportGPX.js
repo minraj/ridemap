@@ -26,12 +26,13 @@ function exportGPX() {
 /* ═══════════════════════════════════════════════════════════════
    SEGMENT DETECTION — shared road sections between rides
 ═══════════════════════════════════════════════════════════════ */
-function detectSharedSegments(rideA, rideB, thresholdM) {
+async function detectSharedSegments(rideA, rideB, thresholdM) {
   if (thresholdM === undefined) thresholdM = 50;
   const shared = [];
   let inSeg = false, segStart = null;
   const step = Math.max(1, Math.floor(rideA.points.length / 500));
   for (let i = 0; i < rideB.points.length; i++) {
+    if (i % 1000 === 0) await new Promise(r => setTimeout(r, 0));
     const pb = rideB.points[i];
     let minDist = Infinity;
     for (let j = 0; j < rideA.points.length; j += step) {
@@ -53,7 +54,7 @@ function detectSharedSegments(rideA, rideB, thresholdM) {
   return shared;
 }
 
-function renderSegments(body, vis) {
+async function renderSegments(body, vis) {
   const lbl = document.createElement('div');
   lbl.className = 'slbl'; lbl.textContent = 'Shared road segments';
   body.appendChild(lbl);
@@ -62,15 +63,17 @@ function renderSegments(body, vis) {
     el.innerHTML = '<b>Load 2+ rides</b> to detect shared road sections.';
     body.appendChild(el); return;
   }
-  if (window._segLayers) { window._segLayers.forEach(l => map.removeLayer(l)); }
-  window._segLayers = [];
+  if (_segLayers) { _segLayers.forEach(l => map.removeLayer(l)); }
+  _segLayers = [];
+
+  loader(true, 'Detecting shared segments…');
 
   // Collect all segments with metadata
   const allSegs = [];
   for (let i = 0; i < vis.length; i++) {
     for (let j = i + 1; j < vis.length; j++) {
       const A = vis[i], B = vis[j];
-      const segs = detectSharedSegments(A, B);
+      const segs = await detectSharedSegments(A, B);
       segs.forEach((seg, k) => {
         const distKm = seg.length > 1 ? haversine(seg[0], seg[seg.length-1]) : 0;
         // Calculate segment stats
@@ -87,6 +90,7 @@ function renderSegments(body, vis) {
       });
     }
   }
+  loader(false);
 
   // Sort by distance (longest first)
   allSegs.sort((a, b) => b.distance - a.distance);
@@ -94,7 +98,7 @@ function renderSegments(body, vis) {
   let totalFound = allSegs.length;
   allSegs.forEach((s, idx) => {
     const layer = L.polyline(s.points.map(p => [p.lat, p.lng]), {color:'#ffffff', weight:4, opacity:.6, dashArray:'8 4'}).addTo(map);
-    window._segLayers.push(layer);
+    _segLayers.push(layer);
     const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
     const row = document.createElement('div'); row.className = 'seg-row';
     const stats = [];

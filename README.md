@@ -159,8 +159,15 @@ Then the **Admin** button appears in the top bar after signing in.
 
 ```
 ridecomp/
-├── index.html    ← entire app (~1700 lines, HTML + CSS + JS)
-├── _headers      ← Cloudflare Pages security headers
+├── index.html
+├── assets/
+│   ├── script.js
+│   ├── style.css
+│   ├── ridemap-patch.js
+│   ├── ridemap-patch.css
+│   ├── exportGPX.js
+│   └── config.js
+├── _headers
 ├── .gitignore
 ├── LICENSE
 └── README.md
@@ -192,12 +199,12 @@ index.html
 
 Issues and PRs welcome! Ideas for contributors:
 
-- [ ] Segment detection (highlight shared road sections between rides)
-- [ ] GPX export of loaded rides
+- [x] Segment detection (highlight shared road sections between rides)
+- [x] GPX export of loaded rides
 - [ ] Strava import via OAuth
-- [ ] Mobile responsive layout
-- [ ] Light theme
-- [ ] Lap data from FIT files
+- [x] Mobile responsive layout
+- [x] Light theme
+- [x] Lap data from FIT files
 
 ---
 

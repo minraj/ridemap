@@ -26,6 +26,8 @@
   --card-border: #e5e5df;
   --acc:  #5ba820; --acc2: #1a8a96; --acc3: #a06020;
   --dan:  #b03030; --ok: #1a8a4a; --warn: #907000;
+  --r0:#78b030;--r1:#1a8a96;--r2:#a06020;--r3:#8040b0;
+  --r4:#b04080;--r5:#30a060;--r6:#a0a030;--r7:#4060b0;--r8:#b03030;
 }
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 html,body{height:100%;background:var(--bg);color:var(--tx);font-family:var(--fmono);font-size:14px;line-height:1.5;overflow:hidden;-webkit-font-smoothing:antialiased}
@@ -53,7 +55,7 @@ input,select,textarea{font-family:var(--fmono)}
 .btn{font-size:12px;font-weight:600;padding:5px 12px;border-radius:var(--rad);border:1px solid var(--ln2);background:var(--bg3);color:var(--tx);transition:all .15s}
 .btn:hover{background:var(--bg4);border-color:var(--ln3)}
 .btn.primary{background:var(--acc);color:#121212;border-color:var(--acc);font-weight:800}
-.btn.primary:hover{background:#b6f082}
+.btn.primary:hover{background:var(--acc2)}
 .btn.ghost{background:transparent;border-color:transparent;color:var(--tx2)}
 .btn.ghost:hover{color:var(--tx);background:var(--bg3)}
 .btn.dbtn{border-color:var(--dan);color:var(--dan)}
