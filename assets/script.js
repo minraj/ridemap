@@ -32,7 +32,12 @@ let sbClient     = null;
 let idb          = null;
 let _haloLayers = [];
 window._segLayers = [];
-let cfg          = {url: CONFIG.supabaseUrl, key: CONFIG.supabaseKey, maxHR:190, uid:'local'};
+let cfg          = {
+  url: (typeof CONFIG !== 'undefined') ? CONFIG.supabaseUrl : '',
+  key: (typeof CONFIG !== 'undefined') ? CONFIG.supabaseKey : '',
+  maxHR: 190,
+  uid: 'local'
+};
 let currentUser  = null;
 let pendingSync  = new Set();
 
