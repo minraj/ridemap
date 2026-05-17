@@ -1,45 +1,80 @@
-/* ═══════════════════════════════════════════════════════════════════
-   ridemap-patch.css  —  resizable + collapsible panels
-   Works with the existing style.css variables (--bg2, --acc, etc.)
-   ═══════════════════════════════════════════════════════════════════ */
+/*
+ * ═══════════════════════════════════════════════════════════════════
+ *  ridemap-patch.css  (v2 — bug-fix release)
+ *
+ *  Key change from v1: toggle buttons are NO LONGER children of the
+ *  panels.  They are now children of #main (left/right toggles) and
+ *  #map-panel (chart toggle), positioned via CSS custom properties so
+ *  overflow:hidden on #sidebar / #sp / #cs cannot clip them.
+ *
+ *  Resize handles moved to inner edge (right:0/left:0/top:0) — still
+ *  provide a full-width grab target with no overflow clipping.
+ * ═══════════════════════════════════════════════════════════════════
+ */
 
-/* ── Make panels clipping-friendly for absolute children ─── */
+/* ── Panels: relative + overflow:hidden for content/handles ────── */
 #sidebar, #sp, #cs {
   position: relative !important;
   overflow: hidden !important;
 }
-#sidebar > *,
-#sp      > *,
-#cs      > * {
-  /* Inner content flows naturally */
+
+/* ── #main needs position:relative for toggle button anchoring ─── */
+#main {
+  position: relative;
 }
 
-/* ── Resize handles ──────────────────────────────────────── */
+/* ═══════════════════════════════════════════════════════════════════
+   RESIZE HANDLES
+   All at offset 0 (inner edge) — no negative overflow needed.
+   ═══════════════════════════════════════════════════════════════════ */
 .rm-rh {
   position:   absolute;
   z-index:    450;
   background: transparent;
-  transition: background .12s;
+  transition: background 150ms ease;
   flex-shrink: 0;
 }
 .rm-rh:hover, .rm-rh.rm-drag {
   background: var(--acc);
-  opacity: .55;
+  opacity: 0.6;
 }
-/* Vertical (left↔right) */
-.rm-rh.rm-v { top:0; bottom:0; width:6px; cursor:col-resize; }
-/* Horizontal (up↕down) */
-.rm-rh.rm-h { left:0; right:0; height:6px; cursor:row-resize; }
 
-/* Exact positioning */
-#rm-sb-rh  { right: -3px; top: 0; }   /* sidebar right edge  */
-#rm-sp-rh  { left:  -3px; top: 0; }   /* stats panel left edge */
-#rm-cs-rh  { top:   -3px; left: 0; }  /* chart bar top edge   */
+/* Vertical resize handles */
+.rm-rh.rm-v { top: 0; bottom: 0; width: 5px; cursor: col-resize; }
+/* Horizontal resize handles */
+.rm-rh.rm-h { left: 0; right: 0; height: 5px; cursor: row-resize; }
 
-/* ── Toggle buttons ──────────────────────────────────────── */
+/* Inner-edge placement — entirely within the panel's overflow boundary */
+#rm-sb-rh { right: 0; top: 0; }   /* sidebar: right inner edge  */
+#rm-sp-rh { left:  0; top: 0; }   /* stats:   left  inner edge  */
+#rm-cs-rh { top:   0; left: 0; }  /* chart:   top   inner edge  */
+
+/* Grip pill on chart handle so users discover it's draggable */
+#rm-cs-rh::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 36px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--bg5);
+  pointer-events: none;
+  transition: background 150ms;
+}
+#rm-cs-rh:hover::after, #rm-cs-rh.rm-drag::after {
+  background: var(--acc);
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   TOGGLE BUTTONS
+   Appended to #main or #map-panel (never inside #sidebar / #sp / #cs).
+   Positioned with CSS custom properties so they track panel size live.
+   ═══════════════════════════════════════════════════════════════════ */
 .rm-toggle {
   position:        absolute;
-  z-index:         500;
+  z-index:         510;     /* above map tiles (z 400), below modals (z 800) */
   display:         flex;
   align-items:     center;
   justify-content: center;
@@ -48,62 +83,120 @@
   color:           var(--mu);
   cursor:          pointer;
   user-select:     none;
-  font-size:       10px;
+  font-size:       11px;
+  font-family:     var(--fui);
+  font-weight:     700;
   line-height:     1;
-  transition:      background .12s, color .12s, border-color .12s, opacity .12s;
+  transition:      background 150ms ease,
+                   color 150ms ease,
+                   border-color 150ms ease,
+                   box-shadow 150ms ease;
 }
 .rm-toggle:hover {
   background:   var(--acc);
-  color:        var(--bg);
+  color:        #fff;
   border-color: var(--acc);
+  box-shadow:   0 2px 10px rgba(0,0,0,0.22);
 }
 
-/* Sidebar toggle — right edge, centred vertically */
+/*
+ * SIDEBAR TOGGLE — child of #main
+ * Anchored to the RIGHT edge of the sidebar via left:var(--sbw).
+ * When sidebar is hidden (--sbw → 0) it sits at the left viewport edge.
+ */
 #rm-sb-tog {
-  right: -16px; top: 50%; transform: translateY(-50%);
-  width: 16px; height: 44px;
-  border-left: none;
+  left:      var(--sbw);
+  top:       50%;
+  transform: translateY(-50%);
+  width:     18px;
+  height:    48px;
+  border-left:   none;
   border-radius: 0 var(--rad) var(--rad) 0;
+  /* Smooth movement when --sbw changes via the panel's CSS transition */
+  transition: left 220ms cubic-bezier(0.4, 0, 0.2, 1),
+              background 150ms ease,
+              color 150ms ease,
+              border-color 150ms ease,
+              box-shadow 150ms ease;
 }
 
-/* Stats panel toggle — left edge, centred vertically */
+/*
+ * STATS PANEL TOGGLE — child of #main
+ * Anchored to the LEFT edge of the stats panel via right:var(--stw).
+ * When panel is hidden (--stw → 0) it sits at the right viewport edge.
+ */
 #rm-sp-tog {
-  left: -16px; top: 50%; transform: translateY(-50%);
-  width: 16px; height: 44px;
-  border-right: none;
+  right:     var(--stw);
+  top:       50%;
+  transform: translateY(-50%);
+  width:     18px;
+  height:    48px;
+  border-right:  none;
   border-radius: var(--rad) 0 0 var(--rad);
+  transition: right 220ms cubic-bezier(0.4, 0, 0.2, 1),
+              background 150ms ease,
+              color 150ms ease,
+              border-color 150ms ease,
+              box-shadow 150ms ease;
 }
 
-/* Chart bar toggle — top edge, centred horizontally */
+/*
+ * CHART BAR TOGGLE — child of #map-panel
+ * Anchored above the chart strip via bottom:var(--chh).
+ * When chart is hidden (--chh → 0) it sits at the bottom of the map.
+ */
 #rm-cs-tog {
-  top: -16px; left: 50%; transform: translateX(-50%);
-  width: 44px; height: 16px;
+  bottom:    var(--chh);
+  left:      50%;
+  transform: translateX(-50%);
+  width:     52px;
+  height:    18px;
   border-bottom: none;
   border-radius: var(--rad) var(--rad) 0 0;
   font-size: 9px;
+  letter-spacing: 0.04em;
+  transition: bottom 220ms cubic-bezier(0.4, 0, 0.2, 1),
+              background 150ms ease,
+              color 150ms ease,
+              border-color 150ms ease,
+              box-shadow 150ms ease;
 }
 
-/* ── Collapsed state ───────────────────────────────────── */
-#sidebar.rm-col  { width:  0 !important; min-width: 0 !important; border: none !important; }
-#sp.rm-col       { width:  0 !important; min-width: 0 !important; border: none !important; }
-#cs.rm-col       { height: 0 !important; min-height: 0 !important; border: none !important; }
-
-/* Keep toggles visible even when collapsed */
-#sidebar.rm-col .rm-toggle,
-#sp.rm-col      .rm-toggle,
-#cs.rm-col      .rm-toggle {
-  pointer-events: auto;
+/* ── Pop-out shadow when the adjacent panel is hidden ─────────── */
+/* Sidebar hidden: tab floats with a gentle shadow against map */
+#sidebar[data-sb-state="hidden"] ~ * #rm-sb-tog,
+#sidebar[data-sb-state="hidden"] + #rm-sb-tog {
+  box-shadow: 2px 0 8px rgba(0,0,0,0.18);
 }
 
-/* ── Smooth panel resize ──────────────────────────────── */
-#sidebar { transition: width  .18s ease; }
-#sp      { transition: width  .18s ease; }
-#cs      { transition: height .18s ease; }
+/* ═══════════════════════════════════════════════════════════════════
+   PANEL COLLAPSED STATE
+   ═══════════════════════════════════════════════════════════════════ */
+#sp.rm-col  { width:  0 !important; min-width:  0 !important; border: none !important; }
+#cs.rm-col  { height: 0 !important; min-height: 0 !important; border: none !important; }
 
-/* Pause transition while dragging for snappy feel */
+/* ── Smooth transitions (paused during drag for instant response) ─ */
+#sidebar { transition: width  220ms cubic-bezier(0.4, 0, 0.2, 1); }
+#sp      { transition: width  220ms cubic-bezier(0.4, 0, 0.2, 1); }
+#cs      { transition: height 220ms cubic-bezier(0.4, 0, 0.2, 1); }
+
 #sidebar.rm-drag-active,
 #sp.rm-drag-active,
 #cs.rm-drag-active { transition: none !important; }
 
-/* ── Halo layers sit below tracks in Leaflet SVG ─────── */
+/* ── Subtle drag affordance on chart strip top ─────────────────── */
+#cs::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 4px;
+  background: linear-gradient(to bottom, var(--ln3) 0%, transparent 100%);
+  pointer-events: none;
+  z-index: 1;
+  opacity: 0;
+  transition: opacity 200ms;
+}
+#cs:hover::before { opacity: 1; }
+
+/* ── Map polyline halos stay below tracks ──────────────────────── */
 .rm-halo { pointer-events: none !important; }

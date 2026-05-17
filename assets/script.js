@@ -17,6 +17,14 @@ const HR_ZONES = [
 ];
 
 /* ═══════════════════════════════════════════════════════════════
+   FEATURE FLAGS
+   Set ENABLE_DIFFICULTY_SEGMENTS = true to restore the orange
+   steep-climb overlay. Currently disabled: it breaks on tile
+   switches and creates visual clutter on multi-route comparisons.
+ ═══════════════════════════════════════════════════════════════ */
+const ENABLE_DIFFICULTY_SEGMENTS = false;
+
+/* ═══════════════════════════════════════════════════════════════
    STATE
  ═══════════════════════════════════════════════════════════════ */
 let rides       = [];
@@ -99,7 +107,9 @@ function setTileLayer(name) {
   _haloLayers = [];
 
   rides.forEach(r => {
-    if (!map.hasLayer(r.poly)) return;
+    // Use r.group (the LayerGroup) — hasLayer(r.poly) is always false because
+    // poly lives inside the group, not directly on the map.
+    if (!map.hasLayer(r.group)) return;
     // Thicker + full opacity on light tiles so routes stay readable
     r.poly.setStyle({
       color: r.color,
@@ -354,6 +364,10 @@ function onDrop(e)      { e.preventDefault(); document.getElementById('dz').clas
    RIDE MANAGEMENT
 ═══════════════════════════════════════════════════════════════ */
 function buildClimbPolylines(points) {
+  // Disabled: see ENABLE_DIFFICULTY_SEGMENTS feature flag.
+  // Steep-segment overlays break on tile switches and clutter multi-route views.
+  if (!ENABLE_DIFFICULTY_SEGMENTS) return [];
+
   const steepPolys = [];
   let currentClimb = [];
   for (let i=1; i<points.length; i++) {
@@ -600,7 +614,7 @@ function applyPolylineVisibility() {
           opacity: isPrimary ? 1 : 0.3,
           dashArray: isPrimary ? null : '5, 10'
         });
-        if (r.steepPolys) {
+        if (ENABLE_DIFFICULTY_SEGMENTS && r.steepPolys) {
           r.steepPolys.forEach(sp => sp.setStyle({
             opacity: isPrimary ? 0.9 : 0.2
           }));
@@ -611,7 +625,7 @@ function applyPolylineVisibility() {
           opacity: 0.88,
           dashArray: null
         });
-        if (r.steepPolys) r.steepPolys.forEach(sp => sp.setStyle({opacity: 0.9}));
+        if (ENABLE_DIFFICULTY_SEGMENTS && r.steepPolys) r.steepPolys.forEach(sp => sp.setStyle({opacity: 0.9}));
       }
     } else {
       map.removeLayer(r.group);

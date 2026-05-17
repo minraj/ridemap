@@ -1,57 +1,77 @@
 /**
- * ridemap-patch.js
- * Adds resizable + collapsible panels to RideComp.
- * Polyline visibility is handled directly in script.js setTileLayer().
- * Runs after DOMContentLoaded; no dependency on script.js internals.
+ * ridemap-patch.js  (v4 — clean)
+ *
+ * What this file does:
+ *   1. Theme → tile sync  (FIX 1)
+ *      script.js always initialises with 'dark' tile. We detect the active
+ *      OS / stored theme and click the matching tile button after initMap().
+ *      toggleTheme() is wrapped to keep tile and theme in sync.
+ *
+ *   2. Sidebar layout management  (FIX 3)
+ *      Toggle buttons appended to #main / #map-panel (NOT inside the panels)
+ *      so overflow:hidden cannot clip them. Positioned via CSS custom
+ *      properties --sbw / --stw / --chh that track live panel size.
+ *
+ * What was REMOVED vs v2/v3:
+ *   - patchSetTileLayer()   — attempted to override window.setTileLayer,
+ *                             which never worked because script.js calls
+ *                             setTileLayer() via its own lexical scope.
+ *   - hookTileButtons()     — attached click listeners to work around the
+ *                             above and call repairSteepPolys().
+ *   - repairSteepPolys()    — re-applied bringToFront() on steep segment
+ *                             overlays after tile switch.
+ *
+ *   All of the above are now unnecessary because ENABLE_DIFFICULTY_SEGMENTS
+ *   is set to false in script.js — buildClimbPolylines() returns [] so no
+ *   steep overlay polylines are ever created. The route colouring is purely
+ *   file-based (one solid colour per ride) and persists across all tile
+ *   changes via the corrected map.hasLayer(r.group) guard in setTileLayer().
  */
 (function () {
   'use strict';
 
-  /* ── Storage helpers ──────────────────────────────────── */
+  /* ── Storage ────────────────────────────────────────────────── */
   function lsSet(k, v) { try { localStorage.setItem('rmp_' + k, String(v)); } catch (_) {} }
-  function lsGet(k, fb) { try { var v = localStorage.getItem('rmp_' + k); return v !== null ? v : fb; } catch (_) { return fb; } }
+  function lsGet(k, fb) {
+    try { var v = localStorage.getItem('rmp_' + k); return v !== null ? v : fb; }
+    catch (_) { return fb; }
+  }
 
-  /* ── Create element helper ────────────────────────────── */
+  /* ── DOM helper ─────────────────────────────────────────────── */
   function el(tag, props, parent) {
     var e = document.createElement(tag);
-    if (props.id)        e.id        = props.id;
-    if (props.className) e.className = props.className;
-    if (props.title)     e.title     = props.title;
+    if (props.id)        e.id          = props.id;
+    if (props.className) e.className   = props.className;
+    if (props.title)     e.title       = props.title;
     if (props.text)      e.textContent = props.text;
     if (parent) parent.appendChild(e);
     return e;
   }
 
-  /* ── Global layout adjustment for all panels ───────────────── */
+  /* ── Layout invalidation ────────────────────────────────────── */
   function adjustLayout() {
     if (window.map && typeof window.map.invalidateSize === 'function') {
       window.map.invalidateSize({ animate: false });
     }
-    var chart = document.getElementById('pc');
-    if (chart) {
-      try {
-        var c = Chart.getChart(chart);
-        if (c) c.resize();
-      } catch (_) {}
+    var canvas = document.getElementById('pc');
+    if (canvas) {
+      try { var c = Chart.getChart(canvas); if (c) c.resize(); } catch (_) {}
     }
   }
-
-  /* ── Delayed layout for after CSS transitions ───────────────── */
-  function adjustLayoutDelayed() {
+  function adjustLayoutDelayed(ms) {
     clearTimeout(window.rmLayoutTimer);
-    window.rmLayoutTimer = setTimeout(adjustLayout, 320);
+    window.rmLayoutTimer = setTimeout(adjustLayout, ms || 280);
   }
 
-  /* ── Drag-to-resize ───────────────────────────────────── */
+  /* ── Drag-to-resize ─────────────────────────────────────────── */
   function makeDraggable(handle, opts) {
-    // opts: { axis:'x'|'y', invert:bool, panel:el, getSize:fn, setSize:fn }
     var startPos, startSize;
-
     function start(cx, cy) {
       startPos  = opts.axis === 'x' ? cx : cy;
       startSize = opts.getSize();
       handle.classList.add('rm-drag');
       opts.panel.classList.add('rm-drag-active');
+      document.body.style.userSelect = 'none';
     }
     function move(cx, cy) {
       var cur   = opts.axis === 'x' ? cx : cy;
@@ -61,176 +81,239 @@
     function end() {
       handle.classList.remove('rm-drag');
       opts.panel.classList.remove('rm-drag-active');
-      adjustLayoutDelayed();
+      document.body.style.userSelect = '';
+      adjustLayoutDelayed(50);
     }
-
     handle.addEventListener('mousedown', function (e) {
-      e.preventDefault();
-      start(e.clientX, e.clientY);
-      function mm(e) { move(e.clientX, e.clientY); }
-      function mu()  { end(); document.removeEventListener('mousemove', mm); document.removeEventListener('mouseup', mu); }
+      e.preventDefault(); start(e.clientX, e.clientY);
+      function mm(ev) { move(ev.clientX, ev.clientY); }
+      function mu()   { end(); document.removeEventListener('mousemove', mm); document.removeEventListener('mouseup', mu); }
       document.addEventListener('mousemove', mm);
       document.addEventListener('mouseup', mu);
     });
     handle.addEventListener('touchstart', function (e) {
-      var t = e.touches[0];
-      start(t.clientX, t.clientY);
-      function tm(e) { var t = e.touches[0]; move(t.clientX, t.clientY); }
-      function te()  { end(); handle.removeEventListener('touchmove', tm); handle.removeEventListener('touchend', te); }
-      handle.addEventListener('touchmove', tm, {passive: true});
+      var t = e.touches[0]; start(t.clientX, t.clientY);
+      function tm(ev) { var tt = ev.touches[0]; move(tt.clientX, tt.clientY); }
+      function te()   { end(); handle.removeEventListener('touchmove', tm); handle.removeEventListener('touchend', te); }
+      handle.addEventListener('touchmove', tm, { passive: true });
       handle.addEventListener('touchend', te);
-    }, {passive: true});
+    }, { passive: true });
   }
 
-  /* ═══ SIDEBAR (left) ══════════════════════════════════════════ */
+  /* ═══════════════════════════════════════════════════════════════
+     1. THEME → TILE SYNC
+     ═══════════════════════════════════════════════════════════════ */
+
+  function activeTheme() {
+    var attr = document.documentElement.getAttribute('data-theme');
+    if (attr === 'dark' || attr === 'light') return attr;
+    return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+  }
+
+  /**
+   * Clicks the correct tile button to match the current theme.
+   * Using btn.click() ensures the original setTile() in script.js runs
+   * (updates currentTile, chip state, etc.).
+   */
+  function syncTileToTheme() {
+    var targetTile = activeTheme() === 'dark' ? 'dark' : 'street';
+    document.querySelectorAll('#mc .mb').forEach(function (b) {
+      if (b.textContent.trim().toLowerCase() === targetTile) b.click();
+    });
+  }
+
+  function hookToggleTheme() {
+    if (typeof window.toggleTheme !== 'function') return;
+    var orig = window.toggleTheme;
+    window.toggleTheme = function () {
+      orig();                          /* updates data-theme synchronously */
+      setTimeout(syncTileToTheme, 30);
+    };
+  }
+
+  /* ═══════════════════════════════════════════════════════════════
+     2. LEFT SIDEBAR — 3-state (expanded → mini → hidden)
+     ═══════════════════════════════════════════════════════════════ */
   function setupSidebar() {
-    var panel = document.getElementById('sidebar');
-    if (!panel) return;
+    var panel  = document.getElementById('sidebar');
+    var mainEl = document.getElementById('main');
+    if (!panel || !mainEl) return;
 
-    var sw = lsGet('sb_w', null);
-    if (sw) panel.style.width = parseInt(sw) + 'px';
+    var STATES = ['expanded', 'mini', 'hidden'];
+    var MINI_W = 56;
+    function getExpandedW() { var w = parseInt(lsGet('sb_w','0'),10); return w>120 ? w : 268; }
 
-    var rh = el('div', {id:'rm-sb-rh', className:'rm-rh rm-v'}, panel);
-    var tog = el('div', {id:'rm-sb-tog', className:'rm-toggle', title:'Toggle sidebar'}, panel);
+    /* Handle stays INSIDE panel at right:0 (never clipped) */
+    var rh  = el('div', { id:'rm-sb-rh',  className:'rm-rh rm-v' }, panel);
+    /* Toggle is a child of #main — left:var(--sbw) tracks panel width */
+    var tog = el('div', { id:'rm-sb-tog', className:'rm-toggle', title:'Toggle sidebar' }, mainEl);
 
-    if (lsGet('sb_col', '0') === '1') {
-      panel.classList.add('rm-col');
-      tog.textContent = '▶';
-      document.documentElement.style.setProperty('--sbw', '0px');
-    } else {
-      tog.textContent = '◀';
-      var w = lsGet('sb_w', '268');
-      document.documentElement.style.setProperty('--sbw', w + 'px');
+    function applyState(s, skip) {
+      panel.dataset.sbState = s;
+      if (skip) panel.classList.add('rm-drag-active');
+      if (s === 'expanded') {
+        var w = getExpandedW();
+        panel.style.width = w + 'px';
+        document.documentElement.style.setProperty('--sbw', w + 'px');
+        tog.textContent = '≡'; tog.title = 'Collapse to icon rail';
+        rh.style.pointerEvents = 'auto';
+      } else if (s === 'mini') {
+        panel.style.width = MINI_W + 'px';
+        document.documentElement.style.setProperty('--sbw', MINI_W + 'px');
+        tog.textContent = '◀'; tog.title = 'Hide sidebar';
+        rh.style.pointerEvents = 'none';
+      } else {
+        panel.style.width = '0px';
+        document.documentElement.style.setProperty('--sbw', '0px');
+        tog.textContent = '▶'; tog.title = 'Show sidebar';
+        rh.style.pointerEvents = 'none';
+      }
+      if (skip) { void panel.offsetWidth; panel.classList.remove('rm-drag-active'); }
+      lsSet('sb_state', s);
+      adjustLayoutDelayed();
     }
 
+    tog.addEventListener('click', function () {
+      var cur = panel.dataset.sbState || 'expanded';
+      applyState(STATES[(STATES.indexOf(cur) + 1) % STATES.length]);
+    });
+
     makeDraggable(rh, {
-      axis: 'x', invert: false, panel: panel,
+      axis:'x', invert:false, panel:panel,
       getSize: function () { return panel.getBoundingClientRect().width; },
       setSize: function (w) {
-        var v = Math.max(180, Math.min(500, w));
+        if (panel.dataset.sbState !== 'expanded') return;
+        var v = Math.max(200, Math.min(520, w));
         panel.style.width = v + 'px';
+        document.documentElement.style.setProperty('--sbw', v + 'px');
         lsSet('sb_w', v);
       }
     });
 
-    tog.addEventListener('click', function () {
-      var col = panel.classList.toggle('rm-col');
-      tog.textContent = col ? '▶' : '◀';
-      lsSet('sb_col', col ? '1' : '0');
-      if (col) {
-        document.documentElement.style.setProperty('--sbw', '0px');
-      } else {
-        var w = lsGet('sb_w', '268');
-        document.documentElement.style.setProperty('--sbw', w + 'px');
-      }
-      adjustLayoutDelayed();
-    });
+    var saved = lsGet('sb_state', 'expanded');
+    applyState(STATES.indexOf(saved) >= 0 ? saved : 'expanded', true);
   }
 
-  /* ═══ STATS PANEL (right) ═══════════════════════════════════ */
+  /* ═══════════════════════════════════════════════════════════════
+     3. RIGHT SIDEBAR / STATS — 2-state (visible ↔ hidden)
+     ═══════════════════════════════════════════════════════════════ */
   function setupStatsPanel() {
-    var panel = document.getElementById('sp');
-    if (!panel) return;
+    var panel  = document.getElementById('sp');
+    var mainEl = document.getElementById('main');
+    if (!panel || !mainEl) return;
 
-    var sw = lsGet('sp_w', null);
-    if (sw) panel.style.width = parseInt(sw) + 'px';
+    var savedW = parseInt(lsGet('sp_w','0'),10);
+    if (savedW > 120) panel.style.width = savedW + 'px';
 
-    var rh = el('div', {id:'rm-sp-rh', className:'rm-rh rm-v'}, panel);
-    var tog = el('div', {id:'rm-sp-tog', className:'rm-toggle', title:'Toggle stats panel'}, panel);
+    /* Handle inside panel at left:0 */
+    var rh  = el('div', { id:'rm-sp-rh',  className:'rm-rh rm-v' }, panel);
+    /* Toggle is a child of #main — right:var(--stw) tracks panel width */
+    var tog = el('div', { id:'rm-sp-tog', className:'rm-toggle', title:'Toggle stats panel' }, mainEl);
 
-    if (lsGet('sp_col', '0') === '1') {
-      panel.classList.add('rm-col');
-      tog.textContent = '▶';
-      document.documentElement.style.setProperty('--stw', '0px');
-    } else {
-      tog.textContent = '◀';
-      var w = lsGet('sp_w', '282');
-      document.documentElement.style.setProperty('--stw', w + 'px');
+    function getW() { var w = parseInt(lsGet('sp_w','0'),10); return w>120 ? w : 284; }
+
+    function setCol(col, skip) {
+      if (skip) panel.classList.add('rm-drag-active');
+      if (col) {
+        panel.classList.add('rm-col');
+        document.documentElement.style.setProperty('--stw', '0px');
+        tog.textContent = '◀'; tog.title = 'Show stats panel';
+      } else {
+        panel.classList.remove('rm-col');
+        var w = getW();
+        panel.style.width = w + 'px';
+        document.documentElement.style.setProperty('--stw', w + 'px');
+        tog.textContent = '▶'; tog.title = 'Hide stats panel';
+      }
+      if (skip) { void panel.offsetWidth; panel.classList.remove('rm-drag-active'); }
+      lsSet('sp_col', col ? '1' : '0');
+      adjustLayoutDelayed();
     }
 
+    tog.addEventListener('click', function () { setCol(!panel.classList.contains('rm-col')); });
+
     makeDraggable(rh, {
-      axis: 'x', invert: true, panel: panel,
+      axis:'x', invert:true, panel:panel,
       getSize: function () { return panel.getBoundingClientRect().width; },
       setSize: function (w) {
-        var v = Math.max(180, Math.min(540, w));
+        var v = Math.max(200, Math.min(560, w));
         panel.style.width = v + 'px';
+        document.documentElement.style.setProperty('--stw', v + 'px');
         lsSet('sp_w', v);
       }
     });
 
-    tog.addEventListener('click', function () {
-      var col = panel.classList.toggle('rm-col');
-      tog.textContent = col ? '◀' : '▶';
-      lsSet('sp_col', col ? '1' : '0');
-      if (col) {
-        document.documentElement.style.setProperty('--stw', '0px');
-      } else {
-        var w = lsGet('sp_w', '282');
-        document.documentElement.style.setProperty('--stw', w + 'px');
-      }
-      adjustLayoutDelayed();
-    });
+    setCol(lsGet('sp_col','0') === '1', true);
   }
 
-  /* ═══ CHART BAR (bottom) ═══════════════════════════════════ */
+  /* ═══════════════════════════════════════════════════════════════
+     4. CHART BAR — 2-state + continuous height resize
+     ═══════════════════════════════════════════════════════════════ */
   function setupChartBar() {
-    var panel = document.getElementById('cs');
-    if (!panel) return;
+    var panel    = document.getElementById('cs');
+    var mapPanel = document.getElementById('map-panel');
+    if (!panel || !mapPanel) return;
 
-    var sh = lsGet('cs_h', null);
-    if (sh) panel.style.height = parseInt(sh) + 'px';
+    var savedH = parseInt(lsGet('cs_h','0'),10);
+    if (savedH > 60) panel.style.height = savedH + 'px';
 
-    var rh = el('div', {id:'rm-cs-rh', className:'rm-rh rm-h'}, panel);
-    var tog = el('div', {id:'rm-cs-tog', className:'rm-toggle', title:'Toggle chart'}, panel);
+    /* Handle inside panel at top:0 */
+    var rh  = el('div', { id:'rm-cs-rh',  className:'rm-rh rm-h' }, panel);
+    /* Toggle is a child of #map-panel — bottom:var(--chh) tracks panel height */
+    var tog = el('div', { id:'rm-cs-tog', className:'rm-toggle', title:'Toggle elevation profile' }, mapPanel);
 
-    if (lsGet('cs_col', '0') === '1') {
-      panel.classList.add('rm-col');
-      tog.textContent = '▲';
-      document.documentElement.style.setProperty('--chh', '0px');
-    } else {
-      tog.textContent = '▼';
-      var h = lsGet('cs_h', '146');
-      document.documentElement.style.setProperty('--chh', h + 'px');
+    function getH() { var h = parseInt(lsGet('cs_h','0'),10); return h>60 ? h : 150; }
+
+    function setCol(col, skip) {
+      if (skip) panel.classList.add('rm-drag-active');
+      if (col) {
+        panel.classList.add('rm-col');
+        document.documentElement.style.setProperty('--chh', '0px');
+        tog.textContent = '▲'; tog.title = 'Show elevation profile';
+      } else {
+        panel.classList.remove('rm-col');
+        var h = getH();
+        panel.style.height = h + 'px';
+        document.documentElement.style.setProperty('--chh', h + 'px');
+        tog.textContent = '▼'; tog.title = 'Hide elevation profile';
+      }
+      if (skip) { void panel.offsetWidth; panel.classList.remove('rm-drag-active'); }
+      lsSet('cs_col', col ? '1' : '0');
+      adjustLayoutDelayed();
     }
 
+    tog.addEventListener('click', function () { setCol(!panel.classList.contains('rm-col')); });
+
     makeDraggable(rh, {
-      axis: 'y', invert: true, panel: panel,
+      axis:'y', invert:true, panel:panel,
       getSize: function () { return panel.getBoundingClientRect().height; },
       setSize: function (h) {
-        var v = Math.max(80, Math.min(440, h));
+        var v = Math.max(80, Math.min(480, h));
         panel.style.height = v + 'px';
+        document.documentElement.style.setProperty('--chh', v + 'px');
         lsSet('cs_h', v);
       }
     });
 
-    tog.addEventListener('click', function () {
-      var col = panel.classList.toggle('rm-col');
-      tog.textContent = col ? '▲' : '▼';
-      lsSet('cs_col', col ? '1' : '0');
-      if (col) {
-        document.documentElement.style.setProperty('--chh', '0px');
-      } else {
-        var h = lsGet('cs_h', '146');
-        document.documentElement.style.setProperty('--chh', h + 'px');
-      }
-      adjustLayoutDelayed();
-    });
+    setCol(lsGet('cs_col','0') === '1', true);
   }
 
-  /* ── Expose global layout function ───────────────────────────── */
+  /* ── Export ─────────────────────────────────────────────────── */
   window.rmAdjustLayout = adjustLayout;
 
-  /* ── Boot ─────────────────────────────────────────────── */
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', function () {
-      setupSidebar();
-      setupStatsPanel();
-      setupChartBar();
-    });
-  } else {
+  /* ── Boot ───────────────────────────────────────────────────── */
+  function boot() {
     setupSidebar();
     setupStatsPanel();
     setupChartBar();
+    setTimeout(hookToggleTheme, 0);   /* after script.js defines toggleTheme */
+    setTimeout(syncTileToTheme, 200); /* after initMap() completes */
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', boot);
+  } else {
+    boot();
   }
 
 })();
