@@ -1,202 +1,211 @@
 /*
  * ═══════════════════════════════════════════════════════════════════
- *  ridemap-patch.css  (v2 — bug-fix release)
+ *  ridemap-patch.css — spatial edition
  *
- *  Key change from v1: toggle buttons are NO LONGER children of the
- *  panels.  They are now children of #main (left/right toggles) and
- *  #map-panel (chart toggle), positioned via CSS custom properties so
- *  overflow:hidden on #sidebar / #sp / #cs cannot clip them.
+ *  Manages the three resize handles and three panel-edge toggle tabs
+ *  that ridemap-patch.js injects at runtime.
  *
- *  Resize handles moved to inner edge (right:0/left:0/top:0) — still
- *  provide a full-width grab target with no overflow clipping.
+ *  All toggle buttons are appended to <body> and use
+ *  position:fixed so they float independently of the glass panels.
+ *  Panel positions track CSS custom properties:
+ *    --sbw   sidebar width   (set by patch.js)
+ *    --stw   stats width     (set by patch.js)
+ *    --chh   chart height    (set by patch.js)
+ *    --panel-gap             (14px, from style.css)
  * ═══════════════════════════════════════════════════════════════════
  */
 
-/* ── Panels: relative + overflow:hidden for content/handles ────── */
+/* ══════════════════════════════════════════════════════════════════
+   1.  PANEL BASE — override any conflicting declarations
+   ══════════════════════════════════════════════════════════════════ */
+
+/* Panels are already position:fixed in style.css.
+   Patch only adds overflow:hidden and the resize cursor. */
 #sidebar, #sp, #cs {
-  position: relative !important;
   overflow: hidden !important;
 }
 
-/* ── #main needs position:relative for toggle button anchoring ─── */
-#main {
-  position: relative;
+/* Side-panel transitions (also carries "bottom" so panels
+   smoothly expand when the chart strip is toggled). */
+#sidebar {
+  transition:
+    width  220ms cubic-bezier(.4,0,.2,1),
+    bottom 200ms cubic-bezier(.4,0,.2,1) !important;
+}
+#sp {
+  transition:
+    width  220ms cubic-bezier(.4,0,.2,1),
+    bottom 200ms cubic-bezier(.4,0,.2,1) !important;
+}
+#cs {
+  transition:
+    height 200ms cubic-bezier(.4,0,.2,1),
+    left   220ms cubic-bezier(.4,0,.2,1),
+    right  220ms cubic-bezier(.4,0,.2,1) !important;
 }
 
-/* ═══════════════════════════════════════════════════════════════════
-   RESIZE HANDLES
-   All at offset 0 (inner edge) — no negative overflow needed.
-   ═══════════════════════════════════════════════════════════════════ */
+/* Disable transition while user is actively dragging */
+#sidebar.rm-drag-active,
+#sp.rm-drag-active,
+#cs.rm-drag-active {
+  transition: none !important;
+}
+
+/* Collapsed states */
+#sp.rm-col {
+  width: 0 !important;
+  min-width: 0 !important;
+  border-color: transparent !important;
+  box-shadow: none !important;
+  overflow: hidden !important;
+}
+#cs.rm-col {
+  height: 0 !important;
+  min-height: 0 !important;
+  border-color: transparent !important;
+  box-shadow: none !important;
+  overflow: hidden !important;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   2.  RESIZE HANDLES
+   ══════════════════════════════════════════════════════════════════ */
+
 .rm-rh {
-  position:   absolute;
-  z-index:    450;
+  position: absolute;
+  z-index: 10;
   background: transparent;
-  transition: background 150ms ease;
+  transition: background 160ms ease;
   flex-shrink: 0;
 }
-.rm-rh:hover, .rm-rh.rm-drag {
-  background: var(--acc);
-  opacity: 0.6;
+
+/* Vertical handle (sidebar / stats panel) */
+.rm-rh.rm-v {
+  top: 0; bottom: 0;
+  width: 5px;
+  cursor: col-resize;
 }
 
-/* Vertical resize handles */
-.rm-rh.rm-v { top: 0; bottom: 0; width: 5px; cursor: col-resize; }
-/* Horizontal resize handles */
-.rm-rh.rm-h { left: 0; right: 0; height: 5px; cursor: row-resize; }
+/* Horizontal handle (chart strip) */
+.rm-rh.rm-h {
+  left: 0; right: 0;
+  height: 6px;
+  cursor: row-resize;
+}
 
-/* Inner-edge placement — entirely within the panel's overflow boundary */
-#rm-sb-rh { right: 0; top: 0; }   /* sidebar: right inner edge  */
-#rm-sp-rh { left:  0; top: 0; }   /* stats:   left  inner edge  */
-#rm-cs-rh { top:   0; left: 0; }  /* chart:   top   inner edge  */
+/* Active / hover highlight */
+.rm-rh:hover, .rm-rh.rm-drag { background: var(--acc); opacity: 0.35; }
 
-/* Grip pill on chart handle so users discover it's draggable */
+/* Sidebar handle — right edge */
+#rm-sb-rh { right: 0; top: 0; }
+
+/* Stats handle — left edge */
+#rm-sp-rh { left: 0; top: 0; }
+
+/* Chart handle — top edge with drag pill affordance */
+#rm-cs-rh { top: 0; left: 0; }
 #rm-cs-rh::after {
   content: '';
   position: absolute;
-  left: 50%;
-  top: 50%;
+  left: 50%; top: 50%;
   transform: translate(-50%, -50%);
-  width: 36px;
-  height: 3px;
+  width: 36px; height: 3px;
   border-radius: 2px;
   background: var(--bg5);
   pointer-events: none;
-  transition: background 150ms;
+  transition: background 160ms;
 }
-#rm-cs-rh:hover::after, #rm-cs-rh.rm-drag::after {
-  background: var(--acc);
-}
+#rm-cs-rh:hover::after,
+#rm-cs-rh.rm-drag::after { background: var(--acc); }
 
-/* ═══════════════════════════════════════════════════════════════════
-   TOGGLE BUTTONS
-   Appended to #main or #map-panel (never inside #sidebar / #sp / #cs).
-   Positioned with CSS custom properties so they track panel size live.
-   ═══════════════════════════════════════════════════════════════════ */
+/* ══════════════════════════════════════════════════════════════════
+   3.  PANEL-EDGE TOGGLE TABS
+   ══════════════════════════════════════════════════════════════════ */
+
+/* ── Common base for all three tabs ───────────────────────────── */
 .rm-toggle {
-  position:        absolute;
-  z-index:         510;     /* above map tiles (z 400), below modals (z 800) */
-  display:         flex;
-  align-items:     center;
+  /* Appended to <body> by patch.js — must be fixed */
+  position: fixed !important;
+  z-index: 510;
+
+  display: flex;
+  align-items: center;
   justify-content: center;
-  background:      var(--bg3);
-  border:          1px solid var(--ln2);
-  color:           var(--mu);
-  cursor:          pointer;
-  user-select:     none;
-  font-size:       11px;
-  font-family:     var(--fui);
-  font-weight:     700;
-  line-height:     1;
-  transition:      background 150ms ease,
-                   color 150ms ease,
-                   border-color 150ms ease,
-                   box-shadow 150ms ease;
+
+  /* Glass — matches the floating panels */
+  background: var(--glass-bg);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--glass-border);
+  box-shadow: var(--glass-shadow);
+
+  color: var(--mu);
+  font-size: 11px;
+  font-family: var(--fui);
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  user-select: none;
+
+  transition:
+    background 150ms ease,
+    color      150ms ease,
+    border-color 150ms ease,
+    left    220ms cubic-bezier(.4,0,.2,1),
+    right   220ms cubic-bezier(.4,0,.2,1),
+    bottom  220ms cubic-bezier(.4,0,.2,1);
 }
+
 .rm-toggle:hover {
-  background:   var(--acc);
-  color:        #fff;
+  background: var(--acc);
+  color: #000;
   border-color: var(--acc);
-  box-shadow:   0 2px 10px rgba(0,0,0,0.22);
+  box-shadow: 0 2px 16px rgba(0,0,0,0.22);
 }
 
-/*
- * SIDEBAR TOGGLE — child of #main
- * Anchored to the RIGHT edge of the sidebar via left:var(--sbw).
- * When sidebar is hidden (--sbw → 0) it sits at the left viewport edge.
- */
+/* ── Left panel tab  ──────────────────────────────────────────── */
+/*   Attaches to the right edge of #sidebar.
+     left = panel-gap(14px) + panel-width(--sbw) + small-gap(2px)  */
 #rm-sb-tog {
-  left:      var(--sbw);
-  top:       50%;
+  left: calc(var(--panel-gap, 14px) + var(--sbw, 268px) + 2px);
+  top: 50%;
   transform: translateY(-50%);
-  width:     18px;
-  height:    48px;
-  border-left:   none;
-  border-radius: 0 var(--rad) var(--rad) 0;
-  /* Smooth movement when --sbw changes via the panel's CSS transition */
-  transition: left 220ms cubic-bezier(0.4, 0, 0.2, 1),
-              background 150ms ease,
-              color 150ms ease,
-              border-color 150ms ease,
-              box-shadow 150ms ease;
+  width: 18px;
+  height: 52px;
+  border-left: none;
+  border-radius: 0 10px 10px 0;
 }
 
-/*
- * STATS PANEL TOGGLE — child of #main
- * Anchored to the LEFT edge of the stats panel via right:var(--stw).
- * When panel is hidden (--stw → 0) it sits at the right viewport edge.
- */
+/* ── Right panel tab  ─────────────────────────────────────────── */
+/*   Attaches to the left edge of #sp.                             */
 #rm-sp-tog {
-  right:     var(--stw);
-  top:       50%;
+  right: calc(var(--panel-gap, 14px) + var(--stw, 284px) + 2px);
+  top: 50%;
   transform: translateY(-50%);
-  width:     18px;
-  height:    48px;
-  border-right:  none;
-  border-radius: var(--rad) 0 0 var(--rad);
-  transition: right 220ms cubic-bezier(0.4, 0, 0.2, 1),
-              background 150ms ease,
-              color 150ms ease,
-              border-color 150ms ease,
-              box-shadow 150ms ease;
+  width: 18px;
+  height: 52px;
+  border-right: none;
+  border-radius: 10px 0 0 10px;
 }
 
-/*
- * CHART BAR TOGGLE — child of #map-panel
- * Anchored above the chart strip via bottom:var(--chh).
- * When chart is hidden (--chh → 0) it sits at the bottom of the map.
- */
+/* ── Bottom chart tab  ────────────────────────────────────────── */
+/*   Sits on top of the chart strip, horizontally centred.
+     bottom = panel-gap(14px) + chart-height(--chh) + small-gap(2px) */
 #rm-cs-tog {
-  bottom:    var(--chh);
-  left:      50%;
+  bottom: calc(var(--panel-gap, 14px) + var(--chh, 150px) + 2px);
+  left: 50%;
   transform: translateX(-50%);
-  width:     52px;
-  height:    18px;
+  width: 56px;
+  height: 18px;
   border-bottom: none;
-  border-radius: var(--rad) var(--rad) 0 0;
+  border-radius: 10px 10px 0 0;
   font-size: 9px;
   letter-spacing: 0.04em;
-  transition: bottom 220ms cubic-bezier(0.4, 0, 0.2, 1),
-              background 150ms ease,
-              color 150ms ease,
-              border-color 150ms ease,
-              box-shadow 150ms ease;
 }
 
-/* ── Pop-out shadow when the adjacent panel is hidden ─────────── */
-/* Sidebar hidden: tab floats with a gentle shadow against map */
-#sidebar[data-sb-state="hidden"] ~ * #rm-sb-tog,
-#sidebar[data-sb-state="hidden"] + #rm-sb-tog {
-  box-shadow: 2px 0 8px rgba(0,0,0,0.18);
+/* ── Light theme adjustments ─────────────────────────────────── */
+[data-theme="light"] .rm-toggle,
+:root:not([data-theme="dark"]) .rm-toggle {
+  background: rgba(252,253,250,0.88);
+  border-color: rgba(255,255,255,0.62);
 }
-
-/* ═══════════════════════════════════════════════════════════════════
-   PANEL COLLAPSED STATE
-   ═══════════════════════════════════════════════════════════════════ */
-#sp.rm-col  { width:  0 !important; min-width:  0 !important; border: none !important; }
-#cs.rm-col  { height: 0 !important; min-height: 0 !important; border: none !important; }
-
-/* ── Smooth transitions (paused during drag for instant response) ─ */
-#sidebar { transition: width  220ms cubic-bezier(0.4, 0, 0.2, 1); }
-#sp      { transition: width  220ms cubic-bezier(0.4, 0, 0.2, 1); }
-#cs      { transition: height 220ms cubic-bezier(0.4, 0, 0.2, 1); }
-
-#sidebar.rm-drag-active,
-#sp.rm-drag-active,
-#cs.rm-drag-active { transition: none !important; }
-
-/* ── Subtle drag affordance on chart strip top ─────────────────── */
-#cs::before {
-  content: '';
-  position: absolute;
-  top: 0; left: 0; right: 0;
-  height: 4px;
-  background: linear-gradient(to bottom, var(--ln3) 0%, transparent 100%);
-  pointer-events: none;
-  z-index: 1;
-  opacity: 0;
-  transition: opacity 200ms;
-}
-#cs:hover::before { opacity: 1; }
-
-/* ── Map polyline halos stay below tracks ──────────────────────── */
-.rm-halo { pointer-events: none !important; }

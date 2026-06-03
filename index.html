@@ -3,23 +3,14 @@
 <head>
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>RideComp v1.4 — Garmin Ride Comparator</title>
+  <title>RideComp — Garmin Ride Comparator</title>
   <meta name="description" content="Compare multiple Garmin .fit and .gpx rides with map overlay, elevation, HR, speed charts and training analytics."/>
 
-  <!--
-    ┌─────────────────────────────────────────────────────────────────┐
-    │  ANTI-FOUC: Apply stored theme before first paint.              │
-    │  Reads localStorage and sets data-theme immediately so the      │
-    │  user never sees a flash of the wrong colour scheme.            │
-    └─────────────────────────────────────────────────────────────────┘
-  -->
+  <!-- Anti-FOUC: apply stored theme before first paint -->
   <script>
     (function () {
       var t = localStorage.getItem('ridecomp_theme');
-      // If no saved preference, detect OS preference
-      if (!t) {
-        t = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-      }
+      if (!t) t = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
       document.documentElement.setAttribute('data-theme', t);
     })();
   </script>
@@ -30,41 +21,38 @@
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
 
-  <!--
-    ┌─────────────────────────────────────────────────────────────────┐
-    │  TYPOGRAPHY: Plus Jakarta Sans (UI) + Fira Code (data values)   │
-    │  • Plus Jakarta Sans — humanist geometric, excellent legibility  │
-    │    at small sizes, strong hierarchy 400–800                      │
-    │  • Fira Code — premium monospaced for numeric data, clean        │
-    │    tabular figures, designed for technical readability           │
-    └─────────────────────────────────────────────────────────────────┘
-  -->
+  <!-- Typography: Plus Jakarta Sans (UI) + Fira Code (data) -->
   <link rel="preconnect" href="https://fonts.googleapis.com"/>
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
-  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet"/>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:ital,wght@0,400;0,500;0,600;0,700;0,800;1,700&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet"/>
 
   <link rel="stylesheet" href="assets/style.css"/>
   <link rel="stylesheet" href="assets/ridemap-patch.css"/>
 </head>
 <body>
-<div id="app">
 
-<!-- ═══ TOP BAR ════════════════════════════════════════════════════ -->
+<!-- ═══ MAP — full-bleed canvas ══════════════════════════════════════ -->
+<div id="map"></div>
+
+<!-- ═══ FLOATING TOOLBAR — top center pill ════════════════════════════ -->
 <div id="topbar">
-  <div class="logo">Ride<em>Comp</em></div>
-  <div class="vsep"></div>
-  <div class="tagline">Garmin Ride Comparator</div>
-  <div class="tbr">
+  <div class="tb-brand">
+    <span class="logo">Ride<em>Comp</em></span>
+    <span class="tb-sep-v"></span>
     <span class="chip" id="chip-count">0 rides</span>
-    <span class="chip on" id="chip-live" style="display:none">● comparing</span>
+    <span class="chip on"   id="chip-live"    style="display:none">● comparing</span>
     <span class="chip warn" id="chip-unsaved" style="display:none">● unsaved</span>
-    <span class="chip" id="chip-user" style="display:none"></span>
-    <button class="btn ghost" id="btn-admin" style="display:none" onclick="openAdmin()">👥 Admin</button>
-    <button class="btn ghost" id="btn-mob-sb" style="padding:4px 8px;display:none" onclick="toggleMobPanel('sidebar')">☰</button>
-    <button class="btn ghost" id="btn-mob-st" style="padding:4px 8px;display:none" onclick="toggleMobPanel('sp')">📊</button>
-    <button class="btn ghost" title="Toggle light/dark (Ctrl+K)" onclick="toggleTheme()">◑</button>
-    <button class="btn ghost" title="Keyboard shortcuts (?)" onclick="openHelp()">⌨</button>
-    <button class="btn ghost" onclick="openSettings()">⚙ Settings</button>
+    <span class="chip"      id="chip-user"    style="display:none"></span>
+  </div>
+  <div class="tb-div"></div>
+  <div class="tbr">
+    <button class="btn ghost tb-icon" id="btn-admin"  style="display:none" onclick="openAdmin()"              title="Admin">👥</button>
+    <button class="btn ghost tb-icon" id="btn-mob-sb" style="display:none" onclick="toggleMobPanel('sidebar')" title="Rides">☰</button>
+    <button class="btn ghost tb-icon" id="btn-mob-st" style="display:none" onclick="toggleMobPanel('sp')"      title="Stats">📊</button>
+    <button class="btn ghost tb-icon" title="Toggle light/dark (Ctrl+K)" onclick="toggleTheme()">◑</button>
+    <button class="btn ghost tb-icon" title="Keyboard shortcuts"          onclick="openHelp()">⌨</button>
+    <button class="btn ghost tb-icon" title="Settings"                    onclick="openSettings()">⚙</button>
+    <div class="tb-div"></div>
     <button class="btn" id="btn-sync" style="display:none" onclick="syncToSupabase()">↑ Sync</button>
     <button class="btn" onclick="clearAll()">Clear</button>
     <button class="btn primary" onclick="document.getElementById('fi').click()">+ Import</button>
@@ -72,119 +60,105 @@
   </div>
 </div>
 
-<!-- ═══ MAIN ════════════════════════════════════════════════════════ -->
-<div id="main">
+<!-- ═══ LEFT PANEL — rides ═══════════════════════════════════════════ -->
+<div id="sidebar" data-sb-state="expanded">
+  <!-- Legacy toggles (hidden, superseded by patch) -->
+  <button class="collapse-btn" style="display:none"></button>
+  <button class="toggle-btn"   style="display:none"></button>
+  <button class="btn ghost mob-close" onclick="toggleMobPanel('sidebar')" title="Close">✕</button>
 
-  <!-- ── LEFT SIDEBAR (Rides / Navigation) ──────────────────────── -->
-  <!--
-    data-sb-state controls the 3-state toggle managed by ridemap-patch.js:
-      "expanded" → full width (268px)  — shows all ride details
-      "mini"     → icon rail  (56px)   — shows colour dots only
-      "hidden"   → off screen (0px)    — maximum map real estate
-  -->
-  <div id="sidebar" data-sb-state="expanded">
-    <!-- Legacy toggle buttons (hidden via CSS, superseded by patch toggle) -->
-    <button class="collapse-btn" onclick="this.parentElement.classList.toggle('sidebar-collapsed')" title="Collapse Sidebar" style="display:none">&gt;</button>
-    <button class="toggle-btn"   onclick="this.parentElement.classList.toggle('hidden')"            title="Toggle Sidebar"   style="display:none">◀</button>
-    <button class="btn ghost mob-close" onclick="toggleMobPanel('sidebar')" title="Close">✕</button>
-
-    <!-- Rides header -->
-    <div class="ph">
-      <div style="display:flex; align-items:center; gap:8px; width:100%; margin-bottom:8px">
+  <!-- Panel header — optional hero image via image_437f98.jpg background -->
+  <div class="ph">
+    <div class="panel-header-inner">
+      <div class="panel-wordmark sb-full-only">
+        <span class="panel-logo">Ride<em>Comp</em></span>
+        <span class="panel-tagline">Ride Comparator</span>
+      </div>
+      <div class="ph-row">
         <span class="pt sb-full-only">Rides</span>
-        <span id="rc-lbl" class="sb-full-only" style="font-size:10px;color:var(--mu)">0</span>
-        <button class="btn ghost sb-full-only" style="padding:3px 7px;font-size:10px" onclick="showAllRides()" title="Show all rides">All</button>
-        <div style="margin-left:auto; display:flex; align-items:center; gap:5px; font-size:10px; color:var(--tx2)" class="sb-full-only">
-          <input type="checkbox" id="multi-select-toggle" onchange="toggleMultiSelect(this.checked)"> Multi
-        </div>
+        <span id="rc-lbl" class="rc-count sb-full-only">0</span>
+        <button class="btn ghost sb-full-only pill-btn" onclick="showAllRides()" title="Show all rides">All</button>
+        <label class="multi-label sb-full-only">
+          <input type="checkbox" id="multi-select-toggle" onchange="toggleMultiSelect(this.checked)">
+          <span>Multi</span>
+        </label>
       </div>
     </div>
+  </div>
 
-    <!-- Rides list -->
-    <div id="rides-list">
-      <div id="sb-empty" class="empty">
-        <div class="ei">🚴</div>
-        <div class="et sb-full-only">No rides loaded</div>
-        <div class="es sb-full-only">Drop .fit or .gpx files below</div>
-      </div>
+  <!-- Rides list -->
+  <div id="rides-list">
+    <div id="sb-empty" class="empty">
+      <div class="ei">🚴</div>
+      <div class="et sb-full-only">No rides loaded</div>
+      <div class="es sb-full-only">Drop .fit or .gpx files below,<br>or click Import above</div>
     </div>
+  </div>
 
-    <!-- Drop zone -->
-    <div id="dz" onclick="document.getElementById('fi').click()"
-         ondragover="onDragOver(event)" ondragleave="onDragLeave(event)" ondrop="onDrop(event)">
-      <div class="dz-icon">📂</div>
-      <div class="dz1 sb-full-only">Drop files here</div>
-      <div class="dz2 sb-full-only">.fit or .gpx — multiple OK</div>
+  <!-- Drop zone -->
+  <div id="dz" onclick="document.getElementById('fi').click()"
+       ondragover="onDragOver(event)" ondragleave="onDragLeave(event)" ondrop="onDrop(event)">
+    <div class="dz-icon">📂</div>
+    <div class="dz1 sb-full-only">Drop files here</div>
+    <div class="dz2 sb-full-only">.fit or .gpx · multiple OK</div>
+  </div>
+
+  <!-- DB status badge -->
+  <div id="db-badge" onclick="openSettings()">
+    <div id="dbdot"></div>
+    <span id="dblbl" class="sb-full-only">Local storage only</span>
+  </div>
+</div>
+
+<!-- ═══ RIGHT PANEL — stats / vitals ═════════════════════════════════ -->
+<div id="sp">
+  <button class="collapse-btn" style="display:none"></button>
+  <button class="toggle-btn"   style="display:none"></button>
+  <button class="btn ghost mob-close" onclick="toggleMobPanel('sp')" title="Close">✕</button>
+
+  <div class="stabs">
+    <div class="stab on" onclick="setTab('compare',this)">Compare</div>
+    <div class="stab"    onclick="setTab('vitals',this)">Vitals</div>
+    <div class="stab"    onclick="setTab('plan',this)">Plan</div>
+    <div class="stab"    onclick="setTab('segments',this)">Segments</div>
+  </div>
+  <div id="sb">
+    <div id="st-empty" class="empty">
+      <div class="ei">📊</div>
+      <div class="et">No data yet</div>
+      <div class="es">Import rides to compare stats<br>and plan training</div>
     </div>
+  </div>
+</div>
 
-    <!-- DB badge -->
-    <div id="db-badge" onclick="openSettings()">
-      <div id="dbdot"></div>
-      <span id="dblbl" class="sb-full-only">Local storage only</span>
+<!-- ═══ BOTTOM PANEL — elevation / HR / speed profile ════════════════ -->
+<div id="cs">
+  <div class="csh">
+    <span class="cst">Profile</span>
+    <div class="cts">
+      <button class="ct on" onclick="setChart('elevation',this)">Elevation</button>
+      <button class="ct"    onclick="setChart('hr',this)">Heart Rate</button>
+      <button class="ct"    onclick="setChart('speed',this)">Speed</button>
+      <button class="ct"    onclick="setChart('cadence',this)">Cadence</button>
+      <button class="ct"    onclick="setChart('power',this)">Power</button>
     </div>
-  </div><!-- /sidebar -->
+  </div>
+  <div id="cw"><canvas id="pc"></canvas></div>
+</div>
 
-  <!-- ── MAP + CHART ─────────────────────────────────────────────── -->
-  <div id="map-panel">
-    <div id="map"></div>
+<!-- ═══ MAP CONTROLS — tile selector ════════════════════════════════ -->
+<div id="mc">
+  <button class="mb"    onclick="setTile('light',this)">Light</button>
+  <button class="mb on" onclick="setTile('dark',this)">Dark</button>
+  <button class="mb"    onclick="setTile('sat',this)">Satellite</button>
+  <button class="mb"    onclick="setTile('topo',this)">Topo</button>
+  <button class="mb"    onclick="setTile('street',this)">Street</button>
+</div>
 
-    <!-- Map tile controls -->
-    <div id="mc">
-      <button class="mb on" onclick="setTile('dark',this)">Dark</button>
-      <button class="mb"    onclick="setTile('sat',this)">Satellite</button>
-      <button class="mb"    onclick="setTile('topo',this)">Topo</button>
-      <button class="mb"    onclick="setTile('street',this)">Street</button>
-    </div>
+<!-- ═══ MAP HOVER LABEL ══════════════════════════════════════════════ -->
+<div id="mhl"></div>
 
-    <!-- Map hover label -->
-    <div id="mhl"></div>
-
-    <!-- ── CHART STRIP (bottom) ─────────────────────────────────── -->
-    <!--
-      The chart strip has a draggable top edge (ridemap-patch.js).
-      Dragging it up expands the profile; dragging to zero collapses it.
-    -->
-    <div id="cs">
-      <div class="csh">
-        <span class="cst">Profile</span>
-        <div class="cts">
-          <button class="ct on" onclick="setChart('elevation',this)">Elevation</button>
-          <button class="ct"    onclick="setChart('hr',this)">Heart Rate</button>
-          <button class="ct"    onclick="setChart('speed',this)">Speed</button>
-          <button class="ct"    onclick="setChart('cadence',this)">Cadence</button>
-          <button class="ct"    onclick="setChart('power',this)">Power</button>
-        </div>
-      </div>
-      <div id="cw"><canvas id="pc"></canvas></div>
-    </div>
-  </div><!-- /map-panel -->
-
-  <!-- ── RIGHT SIDEBAR (Vitals / Comparison) ────────────────────── -->
-  <div id="sp">
-    <!-- Legacy toggles (superseded by patch toggle) -->
-    <button class="collapse-btn" onclick="this.parentElement.classList.toggle('sidebar-collapsed')" title="Collapse Stats" style="display:none">&lt;</button>
-    <button class="toggle-btn"   onclick="this.parentElement.classList.toggle('hidden')"            title="Toggle Stats"   style="display:none">▶</button>
-    <button class="btn ghost mob-close" onclick="toggleMobPanel('sp')" title="Close">✕</button>
-
-    <div class="stabs">
-      <div class="stab on" onclick="setTab('compare',this)">Compare</div>
-      <div class="stab"    onclick="setTab('vitals',this)">Vitals</div>
-      <div class="stab"    onclick="setTab('plan',this)">Plan</div>
-      <div class="stab"    onclick="setTab('segments',this)">Segments</div>
-    </div>
-    <div id="sb">
-      <div id="st-empty" class="empty">
-        <div class="ei">📊</div>
-        <div class="et">No data</div>
-        <div class="es">Import rides to compare stats and plan training</div>
-      </div>
-    </div>
-  </div><!-- /sp -->
-
-</div><!-- /main -->
-</div><!-- /app -->
-
-<!-- Mobile overlay -->
+<!-- ═══ MOBILE OVERLAY ══════════════════════════════════════════════ -->
 <div class="mob-overlay" id="mob-overlay" onclick="closeAllPanels()"></div>
 
 <!-- ═══ SETTINGS / AUTH MODAL ═══════════════════════════════════════ -->
@@ -195,7 +169,6 @@
   <div id="view-auth">
     <div class="mt">Sign in to RideComp</div>
     <div class="ms">Sync rides across devices. Family plan: each member's data is stored separately.</div>
-
     <div class="auth-provider-btns">
       <button class="auth-btn" onclick="authWith('github')">
         <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.531 1.032 1.531 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z"/></svg>
@@ -210,16 +183,9 @@
         Continue with Facebook
       </button>
     </div>
-
     <div class="auth-divider">or request access</div>
-    <div class="fr">
-      <label class="fl">Full name</label>
-      <input class="fi2" id="reg-name" placeholder="Your name"/>
-    </div>
-    <div class="fr">
-      <label class="fl">Email</label>
-      <input class="fi2" id="reg-email" type="email" placeholder="you@example.com"/>
-    </div>
+    <div class="fr"><label class="fl">Full name</label><input class="fi2" id="reg-name" placeholder="Your name"/></div>
+    <div class="fr"><label class="fl">Email</label><input class="fi2" id="reg-email" type="email" placeholder="you@example.com"/></div>
     <div class="fr">
       <label class="fl">Password</label>
       <input class="fi2" id="reg-pass" type="password" placeholder="min 8 characters"/>
@@ -237,7 +203,7 @@
     <div class="mt">Settings</div>
     <div class="ms">Configure Supabase sync and manage your data.</div>
     <div id="view-config">
-      <div class="mst">Supabase configuration</div>
+      <div class="mst">Training zones</div>
       <div class="fr">
         <label class="fl">Max HR for zone calculation</label>
         <input class="fi2" id="cfg-maxhr" type="number" placeholder="190" value="190"/>
@@ -262,7 +228,7 @@
     </div>
   </div>
 
-</div><!-- /modal -->
+</div>
 </div>
 
 <!-- ═══ ADMIN PANEL MODAL ════════════════════════════════════════════ -->
@@ -307,6 +273,15 @@
 <script src="assets/config.js"></script>
 <script src="assets/script.js"></script>
 <script src="assets/exportGPX.js"></script>
+<!-- Register CartoDB Positron as 'light' tile (TILES const is mutable) -->
+<script>
+  if (typeof TILES !== 'undefined') {
+    TILES.light = [
+      'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',
+      '© OpenStreetMap contributors © CARTO'
+    ];
+  }
+</script>
 <script src="assets/ridemap-patch.js"></script>
 </body>
 </html>
