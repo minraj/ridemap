@@ -132,6 +132,46 @@ $$;
 -- select cron.schedule('0 * * * *', $$select delete_expired_requests()$$);
 ```
 
+### 2b. Duplicate protection & deleting rides (run once)
+
+Each ride gets a `fingerprint`: its start time (`t:<unix seconds>`), or endpoints + distance for
+untimed routes. The same ride uploaded twice — renamed, or as GPX and FIT — has the same fingerprint.
+
+```sql
+-- 1. Column for the ride fingerprint
+alter table ridecomp_rides add column if not exists fingerprint text;
+
+-- 2. Backfill recorded rides (the app fills in any others the next time you sign in)
+update ridecomp_rides
+set fingerprint = 't:' || floor(extract(epoch from (stats->>'startDate')::timestamptz))::bigint
+where fingerprint is null and stats->>'startDate' is not null;
+
+-- 3. Preview duplicates: every copy except the oldest of each ride
+select id, name, created_at
+from (select id, name, created_at,
+             row_number() over (partition by user_id, fingerprint order by created_at, id) as n
+      from ridecomp_rides where fingerprint is not null) d
+where n > 1
+order by name;
+
+-- 4. Delete them (or use Select → Duplicates → Delete in the app)
+delete from ridecomp_rides where id in (
+  select id from (select id,
+                         row_number() over (partition by user_id, fingerprint order by created_at, id) as n
+                  from ridecomp_rides where fingerprint is not null) d
+  where n > 1);
+
+-- 5. Make the database reject duplicates from now on (fails if step 4 left any)
+create unique index if not exists ridecomp_rides_user_fingerprint
+  on ridecomp_rides (user_id, fingerprint);
+
+-- 6. Let signed-in users delete their own rides (without this, deletes silently do nothing)
+drop policy if exists "Users delete own rides" on ridecomp_rides;
+create policy "Users delete own rides" on ridecomp_rides
+  for delete to authenticated
+  using (auth.uid()::text = user_id);
+```
+
 ### 3. Enable OAuth providers
 
 Supabase → Authentication → Providers → enable GitHub / Google / Facebook and add your OAuth app credentials from each provider's developer console.

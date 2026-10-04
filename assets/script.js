@@ -35,8 +35,8 @@ const METRICS = {
 let rides        = [];
 let view         = 'list';      // 'list' | 'detail' | 'compare'
 let activeId     = null;        // ride shown in the detail view
-let compareMode  = false;       // feed cards act as checkboxes
-let compareIds   = new Set();
+let selectMode   = false;      // feed cards act as checkboxes (compare / delete)
+let selectedIds  = new Set();
 let compareTab   = 'metrics';
 let chartMetric  = 'elevation';
 let filter       = {q:'', range:'all'};
@@ -523,11 +523,11 @@ function processQueue(files, i, added) {
 
   if (ext === 'gpx') {
     const r = new FileReader();
-    r.onload = e => {
+    r.onload = async e => {
       let ride = null;
       try {
         const pts = parseGPX(e.target.result);
-        ride = addRide(pts.trackName || f.name.replace(/\.gpx$/i,''), pts, 'gpx');
+        ride = await importRide(pts.trackName || f.name.replace(/\.gpx$/i,''), pts, 'gpx');
       }
       catch(err) { toast('GPX error in "'+f.name+'": '+err.message, 'err'); console.error(err); }
       next(ride);
@@ -537,11 +537,11 @@ function processQueue(files, i, added) {
 
   } else if (ext === 'fit') {
     const r = new FileReader();
-    r.onload = e => {
+    r.onload = async e => {
       let ride = null;
       try {
         const {pts, laps} = parseFIT(e.target.result);
-        ride = addRide(f.name.replace(/\.fit$/i,''), pts, 'fit', laps);
+        ride = await importRide(f.name.replace(/\.fit$/i,''), pts, 'fit', laps);
       }
       catch(err) { toast('FIT error in "'+f.name+'": '+err.message, 'err'); console.error(err); }
       next(ride);
@@ -760,6 +760,7 @@ function hydrate(rec) {
     laps: rec.laps || [], savedAt: rec.savedAt || Date.parse(rec.created_at) || Date.now(),
     visible: true,
   };
+  r.fingerprint = pts.length ? rideFingerprint(pts, stats) : null;
   r.cum   = cumulativeKm(pts);
   r.simp  = simplifyRDP(pts, SIMPLIFY_M);
   r.smap  = sampleIndices(pts.length, CHART_POINTS);
@@ -796,13 +797,32 @@ function buildThumb(r) {
   return `<svg viewBox="0 0 56 56" aria-hidden="true"><path d="M${pts.map(p => p.join(' ')).join('L')}"/><circle cx="${pts[0][0]}" cy="${pts[0][1]}" r="2.6"/></svg>`;
 }
 
-function addRide(name, points, fileType, laps) {
+// Identifies the same ride across re-uploads, renames and formats (a GPX exported
+// from a FIT, say). Recorded rides: start time to the second — nobody starts two
+// rides in the same second. Untimed routes: endpoints + distance.
+// Must match the SQL backfill in README.md (stats->>'startDate' → 't:<epoch seconds>').
+function rideFingerprint(points, stats) {
+  if (stats.startDate) return 't:' + Math.floor(+new Date(stats.startDate) / 1000);
+  const c = p => p.lat.toFixed(5) + ',' + p.lng.toFixed(5);
+  return 'g:' + c(points[0]) + '|' + c(points[points.length - 1]) + '|' + Math.round((stats.distance || 0) * 100);
+}
+
+// Pre-flight for uploads: refuse a ride that's already loaded here or stored in the cloud
+async function importRide(name, points, fileType, laps) {
   if (!points || !points.length) { toast('"'+name+'" has no GPS points', 'err'); return null; }
-  if (rides.find(r => r.name === name)) { toast('"'+name+'" already loaded', 'warn'); return null; }
+  const stats = computeStats(points);
+  const fp = rideFingerprint(points, stats);
+  const dup = rides.find(r => r.fingerprint === fp) || await findCloudDuplicate(fp);
+  if (dup) { toast(`This ride has already been uploaded ("${dup.name}").`, 'warn'); return null; }
+  return addRide(name, points, fileType, laps, stats);
+}
+
+function addRide(name, points, fileType, laps, stats) {
+  if (!points || !points.length) { toast('"'+name+'" has no GPS points', 'err'); return null; }
 
   const rec = {
     id: 'r_'+Date.now()+'_'+Math.random().toString(36).slice(2,6),
-    name, color: nextColor(), points, stats: computeStats(points),
+    name, color: nextColor(), points, stats: stats || computeStats(points),
     fileType: fileType || 'gpx', laps: laps || [], savedAt: Date.now(),
   };
   idbPut(rec).catch(()=>{});
@@ -814,24 +834,76 @@ function addRide(name, points, fileType, laps) {
   return r;
 }
 
-async function removeRide(id) {
-  const r = rideById(id);
-  if (!r) return;
+// Take a ride out of memory, the map and IndexedDB (not the cloud)
+function detachRide(r) {
   map.removeLayer(r.group);
-  rides = rides.filter(x => x.id !== id);
-  pendingSync.delete(id);
-  compareIds.delete(id);
-  await idbDel(id).catch(()=>{});
-  updateUnsavedChip();
-  if (activeId === id) backToList();
-  else refresh();
+  rides = rides.filter(x => x.id !== r.id);
+  pendingSync.delete(r.id);
+  selectedIds.delete(r.id);
+  idbDel(r.id).catch(()=>{});
 }
 
-async function deleteRide(id) {
-  const r = rideById(id);
-  if (!r || !confirm(`Delete "${r.name}" from this device?`)) return;
-  await removeRide(id);
-  toast('Ride deleted');
+function deleteRide(id) { return deleteRides([id]); }
+
+// Delete from this device and, when signed in, from Supabase. Optimistic: the rides
+// disappear immediately and are put back if the cloud delete fails.
+async function deleteRides(ids) {
+  const list = rides.filter(r => ids.includes(r.id));
+  if (!list.length) return;
+  const cloud = !!(sbClient && currentUser);
+  const what = list.length === 1 ? `"${list[0].name}"` : `${list.length} rides`;
+  if (!confirm(`Delete ${what} from this device${cloud ? ' and the cloud' : ''}? This cannot be undone.`)) return;
+
+  const backup = list.map(r => ({rec: toRecord(r), pending: pendingSync.has(r.id), visible: r.visible}));
+  list.forEach(detachRide);
+  if (list.some(r => r.id === activeId)) { view = 'list'; activeId = null; }
+  if (!selectedIds.size) selectMode = false;
+  updateUnsavedChip();
+  refresh();
+
+  if (!cloud) { toast(`Deleted ${what} from this device`); return; }
+
+  // Rides never synced aren't in the cloud, so don't expect them back
+  const expected = backup.filter(b => !b.pending).map(b => b.rec.id);
+  let failed = expected;
+  try {
+    const {data, error} = expected.length
+      ? await sbClient.from('ridecomp_rides').delete().in('id', expected).eq('user_id', currentUser.id).select('id')
+      : {data: [], error: null};
+    if (error) throw error;
+    // RLS without a delete policy "succeeds" but deletes nothing — check what actually went
+    const gone = new Set((data || []).map(d => d.id));
+    failed = expected.filter(id => !gone.has(id));
+    if (failed.length) throw new Error(`the cloud kept ${failed.length} ride(s) — is there a delete policy on ridecomp_rides?`);
+    toast(`Deleted ${what}`, 'ok');
+  } catch (e) {
+    console.error('Cloud delete failed', e);
+    // Roll back the ones still in the cloud so the list matches the database
+    backup.filter(b => failed.includes(b.rec.id)).forEach(b => {
+      const r = hydrate(b.rec);
+      if (!r) return;
+      r.visible = b.visible;
+      idbPut(b.rec).catch(()=>{});
+    });
+    refresh();
+    toast('Could not delete from the cloud: ' + e.message, 'err');
+  }
+}
+
+// Select every extra copy of the same ride, keeping the oldest one
+function selectDuplicates() {
+  const groups = new Map();
+  rides.forEach(r => groups.set(r.fingerprint, [...(groups.get(r.fingerprint) || []), r]));
+  selectedIds.clear();
+  groups.forEach(list => {
+    if (list.length < 2) return;
+    list.sort((a, b) => a.savedAt - b.savedAt).slice(1).forEach(r => selectedIds.add(r.id));
+  });
+  selectMode = true;
+  refresh();
+  toast(selectedIds.size
+    ? `${selectedIds.size} duplicate ride(s) selected — review them, then Delete`
+    : 'No duplicate rides found', selectedIds.size ? 'warn' : 'ok');
 }
 
 function toggleVis(id) {
@@ -846,7 +918,7 @@ async function clearAll() {
   if (!rides.length && !(await idbAll() || []).length) { toast('No rides to delete'); return; }
   if (!confirm(`Delete all ${rides.length} ride(s) stored on this device? This cannot be undone.`)) return;
   rides.forEach(r => map.removeLayer(r.group));
-  rides = []; compareIds.clear(); pendingSync.clear();
+  rides = []; selectedIds.clear(); pendingSync.clear();
   await idbClear().catch(()=>{});
   updateUnsavedChip();
   closeSettings();
@@ -860,7 +932,7 @@ async function clearAll() {
 function openDetail(id) {
   const r = rideById(id);
   if (!r) return;
-  if (compareMode && view === 'list') { toggleCompareId(id); return; }
+  if (selectMode && view === 'list') { toggleSelected(id); return; }
   view = 'detail';
   activeId = id;
   if (!r.visible) { r.visible = true; saveState(); }
@@ -878,17 +950,23 @@ function backToList() {
   refresh();
 }
 
-function toggleCompareMode(force) {
-  compareMode = force !== undefined ? force : !compareMode;
-  if (!compareMode) compareIds.clear();
+function toggleSelectMode(force) {
+  selectMode = force !== undefined ? force : !selectMode;
+  if (!selectMode) selectedIds.clear();
   refresh();
 }
-function toggleCompareId(id) {
-  compareIds.has(id) ? compareIds.delete(id) : compareIds.add(id);
+function toggleSelected(id) {
+  selectedIds.has(id) ? selectedIds.delete(id) : selectedIds.add(id);
+  refresh();
+}
+function toggleSelectAll() {
+  const list = filteredRides();
+  const all = list.length && list.every(r => selectedIds.has(r.id));
+  list.forEach(r => all ? selectedIds.delete(r.id) : selectedIds.add(r.id));
   refresh();
 }
 function openCompare() {
-  const list = rides.filter(r => compareIds.has(r.id));
+  const list = rides.filter(r => selectedIds.has(r.id));
   if (list.length < 2) { toast('Select at least 2 rides to compare', 'warn'); return; }
   view = 'compare';
   list.forEach(r => { r.visible = true; });
@@ -928,7 +1006,7 @@ function focusRides(list, animate = true) {
 ═══════════════════════════════════════════════════════════════ */
 function focusSet() {
   if (view === 'detail') return new Set([activeId]);
-  if (view === 'compare' || (compareMode && compareIds.size)) return compareIds;
+  if (view === 'compare' || (selectMode && selectedIds.size)) return selectedIds;
   return null;
 }
 
@@ -985,10 +1063,10 @@ function renderFeed() {
 
   feed.innerHTML = list.length || !rides.length ? list.map(r => {
     const s = r.stats;
-    const picked = compareIds.has(r.id);
+    const picked = selectedIds.has(r.id);
     return `<article class="card${r.id === activeId ? ' active' : ''}${!r.visible ? ' muted' : ''}${picked ? ' picked' : ''}"
         role="listitem" tabindex="0" data-id="${r.id}" style="--rc:${r.color}" aria-label="${esc(r.name)}">
-      <div class="card-thumb">${r.thumb}${compareMode ? `<span class="card-check">${icon('check')}</span>` : ''}</div>
+      <div class="card-thumb">${r.thumb}${selectMode ? `<span class="card-check">${icon('check')}</span>` : ''}</div>
       <div class="card-body">
         <div class="card-top">
           <h3 class="card-title">${esc(r.name)}</h3>
@@ -1010,13 +1088,15 @@ function renderFeed() {
     card.addEventListener('pointerleave', () => { if (view === 'list') applyMapStyles(); });
   });
 
-  const modeBtn = document.getElementById('btn-compare-mode');
-  modeBtn.classList.toggle('on', compareMode);
-  modeBtn.hidden = rides.length < 2;
-  const bar = document.getElementById('compare-bar');
-  bar.hidden = !compareMode;
-  document.getElementById('compare-count').textContent = `${compareIds.size} selected`;
-  document.getElementById('btn-compare-go').disabled = compareIds.size < 2;
+  const modeBtn = document.getElementById('btn-select-mode');
+  modeBtn.classList.toggle('on', selectMode);
+  modeBtn.hidden = !rides.length;
+  document.getElementById('select-bar').hidden = !selectMode;
+  const allOn = list.length && list.every(r => selectedIds.has(r.id));
+  document.getElementById('btn-select-all').textContent = allOn ? 'None' : 'All';
+  document.getElementById('select-count').textContent = `${selectedIds.size} selected`;
+  document.getElementById('btn-delete-selected').disabled = !selectedIds.size;
+  document.getElementById('btn-compare-go').disabled = selectedIds.size < 2;
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -1133,7 +1213,7 @@ function renderDetail() {
 
 function renderCompare() {
   const el = document.getElementById('view-compare');
-  const vis = rides.filter(r => compareIds.has(r.id));
+  const vis = rides.filter(r => selectedIds.has(r.id));
   if (vis.length < 2) { backToList(); return; }
 
   el.innerHTML = `
@@ -1143,7 +1223,7 @@ function renderCompare() {
         <h2 class="view-title">Compare</h2>
         <div class="view-meta">${vis.length} rides</div>
       </div>
-      <button class="icon-btn" onclick="focusRides(rides.filter(r => compareIds.has(r.id)))" title="Zoom to rides">${icon('focus')}</button>
+      <button class="icon-btn" onclick="focusRides(rides.filter(r => selectedIds.has(r.id)))" title="Zoom to rides">${icon('focus')}</button>
     </div>
     <div class="view-scroll">
       <div class="legend">${vis.map(r => `<span style="--rc:${r.color}"><i></i>${esc(r.name)}</span>`).join('')}</div>
@@ -1742,6 +1822,23 @@ async function initSupabase() {
   renderHeader();
 }
 
+// null = unknown, false = the fingerprint column hasn't been added yet (see README SQL)
+let cloudHasFingerprint = null;
+const isMissingColumn = e => e && (e.code === '42703' || e.code === 'PGRST204' || /fingerprint/.test(e.message || ''));
+
+async function findCloudDuplicate(fp) {
+  if (!sbClient || !currentUser || cloudHasFingerprint === false) return null;
+  const {data, error} = await sbClient.from('ridecomp_rides')
+    .select('id,name').eq('user_id', currentUser.id).eq('fingerprint', fp).limit(1);
+  if (error) {
+    if (isMissingColumn(error)) { cloudHasFingerprint = false; console.warn('ridecomp_rides.fingerprint missing — run the SQL in README.md'); }
+    else console.warn('Duplicate check failed', error);
+    return null;   // never block an upload because the check itself failed
+  }
+  cloudHasFingerprint = true;
+  return data?.[0] || null;
+}
+
 let _cloudLoad = null;
 function loadRidesFromSupabase() {
   // Shared promise: sign-in can fire twice on load and would hydrate rides twice
@@ -1750,8 +1847,9 @@ function loadRidesFromSupabase() {
     try {
       const {data, error} = await sbClient.from('ridecomp_rides').select('*').eq('user_id', currentUser.id);
       if (error) throw error;
+      if (data?.length) cloudHasFingerprint = 'fingerprint' in data[0];
       const fresh = (data || []).filter(r => !rideById(r.id));
-      if (!fresh.length) return;
+      if (!fresh.length) { backfillFingerprints(data || []); return; }
       loader(true, `Loading ${fresh.length} ride(s) from cloud…`);
       for (const r of fresh) {
         const ride = hydrate(r);
@@ -1760,6 +1858,7 @@ function loadRidesFromSupabase() {
       loader(false);
       refresh();
       toast(`Loaded ${fresh.length} ride(s) from cloud`, 'ok');
+      backfillFingerprints(data);
     } catch(e) {
       loader(false);
       console.error('Failed to load rides from Supabase', e);
@@ -1768,6 +1867,16 @@ function loadRidesFromSupabase() {
       _cloudLoad = null;
     }
   })());
+}
+
+// Rows uploaded before the fingerprint column existed: fill it in from the loaded ride
+function backfillFingerprints(rows) {
+  if (!cloudHasFingerprint) return;
+  rows.filter(row => !row.fingerprint).forEach(row => {
+    const fp = rideById(row.id)?.fingerprint;
+    if (fp) sbClient.from('ridecomp_rides').update({fingerprint: fp}).eq('id', row.id).eq('user_id', currentUser.id)
+      .then(({error}) => { if (error) console.warn('Fingerprint backfill skipped for', row.id, error.message); });
+  });
 }
 
 async function syncToSupabase() {
@@ -1779,7 +1888,7 @@ async function syncToSupabase() {
     toSync = rides;   // nothing pending → re-upload everything
   }
   loader(true,`Syncing ${toSync.length} ride(s)…`);
-  let ok=0, fail=0;
+  let ok=0, fail=0, dupes=0;
   for (const r of toSync) {
     try {
       const payload = {
@@ -1791,9 +1900,17 @@ async function syncToSupabase() {
         stats:r.stats,
         color:r.color
       };
-       const {error} = await sbClient.from('ridecomp_rides').upsert(payload);
-       if (error) throw error;
-       pendingSync.delete(r.id); ok++;
+      if (cloudHasFingerprint !== false) payload.fingerprint = r.fingerprint;
+      let {error} = await sbClient.from('ridecomp_rides').upsert(payload);
+      if (error && isMissingColumn(error)) {
+        cloudHasFingerprint = false;
+        delete payload.fingerprint;
+        ({error} = await sbClient.from('ridecomp_rides').upsert(payload));
+      }
+      // Unique (user_id, fingerprint): the cloud already has this ride under another id
+      if (error && error.code === '23505') { pendingSync.delete(r.id); dupes++; continue; }
+      if (error) throw error;
+      pendingSync.delete(r.id); ok++;
     } catch(e) {
       fail++;
       console.error('Sync error for ride', r.id, e);
@@ -1802,7 +1919,8 @@ async function syncToSupabase() {
   }
   loader(false);
   updateUnsavedChip();
-  toast(fail ? `Synced ${ok}, failed ${fail}`:`${ok} ride(s) synced`, fail?'err':'ok');
+  const skipped = dupes ? ` · ${dupes} already in the cloud (skipped)` : '';
+  toast((fail ? `Synced ${ok}, failed ${fail}` : `${ok} ride(s) synced`) + skipped, fail ? 'err' : dupes ? 'warn' : 'ok');
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -2005,7 +2123,7 @@ function initEvents() {
       if (!document.getElementById('layer-menu').hidden) { toggleLayerMenu(false); return; }
       if (typing) { document.activeElement.blur(); return; }
       if (view !== 'list') backToList();
-      else if (compareMode) toggleCompareMode(false);
+      else if (selectMode) toggleSelectMode(false);
       return;
     }
     if (typing || mod || e.altKey) return;

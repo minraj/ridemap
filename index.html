@@ -90,7 +90,7 @@
     </div>
     <div class="feed-bar">
       <span class="feed-count" id="feed-count">0 rides</span>
-      <button class="chip-btn" id="btn-compare-mode" onclick="toggleCompareMode()"><span data-icon="columns"></span>Compare</button>
+      <button class="chip-btn" id="btn-select-mode" onclick="toggleSelectMode()"><span data-icon="check"></span>Select</button>
     </div>
     <div id="feed" class="feed" role="list"></div>
     <div id="feed-empty" class="empty">
@@ -98,9 +98,12 @@
       <div class="empty-title">No rides yet</div>
       <div class="empty-sub">Drop .gpx or .fit files anywhere on the map, or use <b>Upload</b>.</div>
     </div>
-    <div class="compare-bar" id="compare-bar" hidden>
-      <span id="compare-count">0 selected</span>
-      <button class="btn primary sm" id="btn-compare-go" onclick="openCompare()">Compare</button>
+    <div class="select-bar" id="select-bar" hidden>
+      <button class="link-btn" id="btn-select-all" onclick="toggleSelectAll()">All</button>
+      <span id="select-count">0 selected</span>
+      <button class="btn ghost sm" onclick="selectDuplicates()" title="Select extra copies of the same ride">Duplicates</button>
+      <button class="btn danger sm icon-only" id="btn-delete-selected" onclick="deleteRides([...selectedIds])" title="Delete selected" aria-label="Delete selected"><span data-icon="trash"></span></button>
+      <button class="btn primary sm" id="btn-compare-go" onclick="openCompare()" title="Compare 2 or more rides">Compare</button>
     </div>
   </section>
 

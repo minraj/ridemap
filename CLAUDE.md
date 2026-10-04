@@ -18,13 +18,13 @@ Plain browser scripts with no modules. Every file shares one global scope. Leafl
 
 **Script load order** (end of `index.html`):
 1. `assets/config.js`: optional `CONFIG = {mapTilerKey, mapboxToken}` (template: `config.example.js`). `loadCfg()` merges it with localStorage `ridecomp_cfg`, then always resets `cfg.url`/`cfg.key` to `SUPABASE` and wipes any Supabase values older versions saved.
-2. `assets/script.js`: nearly all app logic, with top-level `let`/`const` state (`rides`, `view`, `activeId`, `compareIds`, `map`, `cfg`, …).
+2. `assets/script.js`: nearly all app logic, with top-level `let`/`const` state (`rides`, `view`, `activeId`, `selectedIds`, `map`, `cfg`, …).
 3. `assets/exportGPX.js`: `exportGPX(ids?)`, the FIT encoder `encodeFIT`/`exportFIT`, and shared-segment detection (`renderSegments`, results cached in `segCache`). Uses `script.js` globals directly.
 
 ### UI model (script.js)
 
 - **Layout:** the map fills the screen. `#panel` is a glass sidebar on desktop, collapsible via `setPanelCollapsed`. Under 768px it becomes a bottom sheet with a draggable height: `setSheet('peek'|'half'|'full')`, plus `--sheet-visible` and `body[data-sheet]`. The map controls are custom (`#map-ctrl`); Leaflet's zoom control is disabled.
-- **Views:** `view` is `'list' | 'detail' | 'compare'`. Use `openDetail(id)`, `backToList()`, `toggleCompareMode()` and `openCompare()`. `renderView()` empties hidden views so their elements don't shadow the active view's. Look canvases up inside the view element, never by global id.
+- **Views:** `view` is `'list' | 'detail' | 'compare'`. Use `openDetail(id)`, `backToList()`, `toggleSelectMode()` and `openCompare()`. `renderView()` empties hidden views so their elements don't shadow the active view's. Look canvases up inside the view element, never by global id.
 - **Rendering:** every state change calls `refresh()`. It's debounced 16ms and runs `applyMapStyles` (focus/dim routes, start/finish pins), then `renderFeed`, then `renderView`. Charts are destroyed and rebuilt on each render (`renderChart`). Hover sync runs both ways: chart → map through `showHoverMarker`, map → chart through `onRouteHover`.
 
 ### Data flow
@@ -32,6 +32,8 @@ Plain browser scripts with no modules. Every file shares one global scope. Leafl
 - **Import:** `handleFiles` → `processQueue` → `parseFIT(ArrayBuffer)` or `parseGPX(text)`. `parseFIT` returns `{pts, laps}` and handles global message 20 Record and 19 Lap. `parseGPX` returns `pts`, with `pts.trackName`. Both go to `addRide(name, points, fileType, laps)`.
 - **Stored record** (IndexedDB `ridecomp_v1`/`rides`, and JSON backup): `{id, name, color, points, stats, fileType, laps, savedAt}`, built by `toRecord(r)`. The store names still use the old "RideComp" naming so existing users' data loads. Don't rename them.
 - **Runtime ride:** `hydrate(record)` adds derived fields: `cum` (cumulative km), `simp` (RDP indices for the map polyline, `SIMPLIFY_M`), `smap` (chart sample indices), `thumb` (SVG), and the `poly`/`casing`/`group` Leaflet layers. `stats` are recomputed whenever `stats.v !== STATS_VER`, so bump `STATS_VER` after changing `computeStats`. A new field on a ride must be added to `toRecord`, `hydrate` and the Supabase payload in `syncToSupabase`.
+- **Duplicates:** `rideFingerprint(points, stats)` gives `t:<start epoch seconds>`, or `g:<first>|<last>|<distance>` for untimed routes. It's set as `r.fingerprint` in `hydrate`, and must match the SQL backfill in `README.md`. Uploads go through `importRide`, which refuses a fingerprint that's already loaded or in the cloud (`findCloudDuplicate`) before calling `addRide`. The cloud has a unique index on `(user_id, fingerprint)`, and sync treats error `23505` as "already in the cloud". Everything degrades gracefully if the `fingerprint` column is missing (`cloudHasFingerprint === false`).
+- **Selection & delete:** `selectMode`/`selectedIds` drive both Compare and Delete. `deleteRides(ids)` is optimistic: it detaches the rides, deletes from Supabase with `.select('id')` to see what was actually removed (RLS without a delete policy returns no error but deletes nothing), and re-hydrates whatever the cloud kept. `selectDuplicates()` selects every copy except the oldest.
 - **Stats:** `computeStats` calculates moving time (gaps ≤ 2 min, faster than about 2 km/h), max gradient over a 100 m window (`maxGradient`), HR zones from `cfg.maxHR`, and TSS.
 
 ### Map tiles

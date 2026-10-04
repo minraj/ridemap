@@ -349,14 +349,17 @@ body.panel-collapsed #panel-reopen { display: grid; }
 .card:hover .card-vis, .card:focus-within .card-vis, .card.muted .card-vis { opacity: 1; }
 @media (hover: none) { .card-vis { opacity: .7; } }
 
-.compare-bar {
-  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+.select-bar {
+  display: flex; align-items: center; gap: 6px;
   margin: 0 12px 12px; padding: 8px 8px 8px 14px;
   border-radius: var(--r-md); background: var(--bg-2); border: 1px solid rgba(6, 182, 212, .35);
   font-size: 13px; color: var(--tx-2);
   animation: rise .2s var(--ease);
 }
 
+.select-bar #select-count { flex: 1; white-space: nowrap; }
+.select-bar .link-btn { font-weight: 600; color: var(--accent-2); }
+.btn.icon-only { width: 32px; padding: 0; }
 .empty { padding: 36px 28px; text-align: center; }
 .empty-art { display: inline-grid; place-items: center; width: 64px; height: 64px; border-radius: 20px; margin-bottom: 14px;
   background: rgba(249, 115, 22, .1); border: 1px solid rgba(249, 115, 22, .25); color: var(--accent); }
