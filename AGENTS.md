@@ -46,4 +46,4 @@ Cloudflare Pages (free):
 - Build command: empty
 - Output directory: `/`
 - Every `git push` auto-deploys.
-- `assets/config.js` isn't committed. Users enter Supabase and map keys in Settings → Connections.
+- `assets/config.js` isn't committed and only holds optional map keys. The Supabase connection is hard-coded in `SUPABASE` in `assets/script.js`.

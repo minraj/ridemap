@@ -138,13 +138,11 @@ Supabase → Authentication → Providers → enable GitHub / Google / Facebook 
 
 ### 4. Configure RideMap
 
-Either copy `assets/config.example.js` to `assets/config.js` (gitignored) and fill it in, or open
-RideMap → avatar → **Settings → Connections**:
-- **Supabase URL**: Supabase → Settings → API → Project URL
-- **Supabase key**: Supabase → Settings → API → anon / publishable key
+The Supabase URL and publishable key are built into `assets/script.js` (`SUPABASE` constant) and
+cannot be changed from the website. To use a different project, edit that constant and redeploy.
 
-Values entered in Settings are stored in the browser (localStorage), so a deployment without
-`config.js` still works — each user enters the connection once.
+In Supabase → Authentication → URL Configuration, set **Site URL** to your Pages URL and add it
+(e.g. `https://<your-project>.pages.dev/`) under **Redirect URLs**, or OAuth sign-in will fail.
 
 ### 5. Promote yourself to admin
 
@@ -187,7 +185,7 @@ Then the **Admin** button appears in the panel header after signing in.
 The default basemaps need no API key. CARTO basemaps (`basemaps.cartocdn.com`) are **not** used:
 they now return an "API KEY REQUIRED" placeholder image for every tile.
 
-For premium styles, add a key under Settings → Connections (or in `config.js`):
+For premium styles, add a key under Settings → Map tiles (or in `config.js`):
 
 | Setting | Used for |
 |---|---|

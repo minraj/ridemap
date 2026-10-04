@@ -10,14 +10,14 @@ python3 -m http.server 8080   # then open http://localhost:8080
 
 No build step, no package.json, no node_modules, no test suite. Test by hand in the browser (`data/sample_ride.gpx` is a sample input). `.eslintrc.json` (eslint:recommended, browser, `sourceType: script`) and `.prettierrc` (single quotes, semicolons, width 100, 2-space) are in the repo for anyone with those tools installed globally, e.g. `npx eslint assets/*.js`. Browsers cache `script.js` aggressively under `http.server`, so hard-reload after edits.
 
-Deployment: Cloudflare Pages with an empty build command and `/` as the output directory. Every push to `main` deploys, so anything pushed goes live. `assets/config.js` is gitignored, so it isn't deployed. Users enter Supabase and map keys under Settings → Connections, which saves them to localStorage.
+Deployment: Cloudflare Pages with an empty build command and `/` as the output directory. Every push to `main` deploys, so anything pushed goes live. The Supabase URL and publishable key are hard-coded in `SUPABASE` at the top of `assets/script.js`, on purpose: the site is private and nobody should be able to point it at another project. Don't make them configurable again. `assets/config.js` (gitignored, not deployed) only holds optional map keys.
 
 ## Architecture
 
 Plain browser scripts with no modules. Every file shares one global scope. Leaflet 1.9.4, Chart.js 4.4.2 and supabase-js v2 load from CDNs in `index.html`. UI markup calls globals through inline `onclick=` attributes (in `index.html` and in HTML strings built in JS), so **renaming a function breaks the markup**.
 
 **Script load order** (end of `index.html`):
-1. `assets/config.js`: optional `CONFIG = {supabaseUrl, supabaseKey, mapTilerKey, mapboxToken}` (template: `config.example.js`). `loadCfg()` merges it with localStorage `ridecomp_cfg`.
+1. `assets/config.js`: optional `CONFIG = {mapTilerKey, mapboxToken}` (template: `config.example.js`). `loadCfg()` merges it with localStorage `ridecomp_cfg`, then always resets `cfg.url`/`cfg.key` to `SUPABASE` and wipes any Supabase values older versions saved.
 2. `assets/script.js`: nearly all app logic, with top-level `let`/`const` state (`rides`, `view`, `activeId`, `compareIds`, `map`, `cfg`, …).
 3. `assets/exportGPX.js`: `exportGPX(ids?)`, the FIT encoder `encodeFIT`/`exportFIT`, and shared-segment detection (`renderSegments`, results cached in `segCache`). Uses `script.js` globals directly.
 
@@ -40,5 +40,5 @@ Plain browser scripts with no modules. Every file shares one global scope. Leafl
 
 ### Persistence & cloud
 
-- **localStorage:** `ridecomp_cfg` holds settings and keys. `ridecomp_state` holds the basemap, panel-collapsed flag, chart metric and hidden ride ids.
-- **Supabase** (schema in `README.md`): tables `ridecomp_rides` (rows scoped by `user_id`) and `ridecomp_users` (`role`: pending | member | admin; admins approve or deny in the Admin modal). `pendingSync` tracks rides waiting to upload. `onSignedIn` is guarded against firing twice, and `loadRidesFromSupabase` shares one in-flight promise.
+- **localStorage:** `ridecomp_cfg` holds max HR and map keys (never the Supabase connection). `ridecomp_state` holds the basemap, panel-collapsed flag, chart metric and hidden ride ids.
+- **Supabase** (schema in `README.md`): tables `ridecomp_rides` (rows scoped by `user_id`) and `ridecomp_users` (`role`: pending | member | admin; admins approve or deny in the Admin modal). `initSupabase()` always runs at boot, which is also what completes a GitHub OAuth redirect. `authWith` passes `redirectTo: origin + pathname`, which must be in Supabase → Auth → URL Configuration → Redirect URLs. `pendingSync` tracks rides waiting to upload. `onSignedIn` is guarded against firing twice, and `loadRidesFromSupabase` shares one in-flight promise.

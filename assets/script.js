@@ -48,10 +48,16 @@ let tileFallback = false;       // a keyed tile provider failed this session →
 let sbClient     = null;
 let idb          = null;
 let segLayers    = [];
+// The site's own Supabase project. Fixed in code on purpose — not user-configurable.
+// The publishable key is meant to be public; data is protected by RLS policies.
+const SUPABASE = {
+  url: 'https://exnqyuwqfvbmakojirua.supabase.co',
+  key: 'sb_publishable_AO2On8ZzClh-gma3_OIwiA_RIFPoOYQ',
+};
 const C = (typeof CONFIG !== 'undefined') ? CONFIG : {};
 let cfg          = {
-  url: C.supabaseUrl || '',
-  key: C.supabaseKey || '',
+  url: SUPABASE.url,
+  key: SUPABASE.key,
   mapTilerKey: C.mapTilerKey || '',
   mapboxToken: C.mapboxToken || '',
   maxHR: 190,
@@ -1489,7 +1495,6 @@ function initSheetDrag() {
 ═══════════════════════════════════════════════════════════════ */
 function ensureSupabaseClient() {
   if (!sbClient) {
-    if (!cfg.url || !cfg.key) { toast('Add your Supabase URL and key under Settings → Connections', 'err'); return null; }
     try {
       sbClient = window.supabase.createClient(cfg.url, cfg.key);
     } catch(e) {
@@ -1505,7 +1510,9 @@ async function authWith(provider) {
   try {
     const {error} = await sbClient.auth.signInWithOAuth({
       provider,
-      options: {redirectTo: window.location.href}
+      // Clean URL: no leftover ?code= / #access_token= from a previous attempt,
+      // so it matches the Redirect URLs allow-list in Supabase
+      options: {redirectTo: location.origin + location.pathname}
     });
     if (error) throw error;
   } catch(e) { toast('OAuth error: '+e.message, 'err'); }
@@ -1669,8 +1676,6 @@ function openSettings() {
     document.getElementById('account-email').textContent = currentUser.email || '';
   }
   document.getElementById('cfg-maxhr').value    = cfg.maxHR || 190;
-  document.getElementById('cfg-sb-url').value   = cfg.url || '';
-  document.getElementById('cfg-sb-key').value   = cfg.key || '';
   document.getElementById('cfg-maptiler').value = cfg.mapTilerKey || '';
   document.getElementById('cfg-mapbox').value   = cfg.mapboxToken || '';
   document.getElementById('mb').classList.add('open');
@@ -1682,11 +1687,10 @@ function saveSettings() {
   const val = id => document.getElementById(id).value.trim();
   const prev = {...cfg};
   cfg.maxHR = parseInt(val('cfg-maxhr')) || 190;
-  cfg.url = val('cfg-sb-url');
-  cfg.key = val('cfg-sb-key');
   cfg.mapTilerKey = val('cfg-maptiler');
   cfg.mapboxToken = val('cfg-mapbox');
-  localStorage.setItem('ridecomp_cfg', JSON.stringify(cfg));
+  const {url, key, ...toSave} = cfg;   // Supabase connection is fixed in code, never stored
+  localStorage.setItem('ridecomp_cfg', JSON.stringify(toSave));
 
   if (cfg.mapTilerKey !== prev.mapTilerKey || cfg.mapboxToken !== prev.mapboxToken) {
     tileFallback = false;
@@ -1695,11 +1699,6 @@ function saveSettings() {
   if (cfg.maxHR !== prev.maxHR) {
     // HR zones / TSS depend on max HR
     rides.forEach(r => { r.stats = computeStats(r.points); idbPut(toRecord(r)).catch(()=>{}); });
-  }
-  if (cfg.url !== prev.url || cfg.key !== prev.key) {
-    sbClient = null; currentUser = null; _signedInFor = null;
-    if (cfg.url && cfg.key) initSupabase();
-    else renderHeader();
   }
   toast('Settings saved', 'ok');
   closeSettings();
@@ -1930,10 +1929,18 @@ function loadCfg() {
     const saved = localStorage.getItem('ridecomp_cfg');
     if (saved) cfg = {...cfg, ...JSON.parse(saved)};
     // config.js wins over empty saved values (e.g. after adding keys to config.js)
-    ['url','key','mapTilerKey','mapboxToken'].forEach(k => {
-      const fromFile = {url:C.supabaseUrl, key:C.supabaseKey, mapTilerKey:C.mapTilerKey, mapboxToken:C.mapboxToken}[k];
-      if (!cfg[k] && fromFile) cfg[k] = fromFile;
-    });
+    if (!cfg.mapTilerKey && C.mapTilerKey) cfg.mapTilerKey = C.mapTilerKey;
+    if (!cfg.mapboxToken && C.mapboxToken) cfg.mapboxToken = C.mapboxToken;
+  } catch(e) { console.warn('Config load error', e); }
+  // Older versions let anyone type a Supabase URL/key into Settings — ignore whatever was saved
+  cfg.url = SUPABASE.url;
+  cfg.key = SUPABASE.key;
+  try {
+    const saved = JSON.parse(localStorage.getItem('ridecomp_cfg') || '{}');
+    if ('url' in saved || 'key' in saved) {
+      delete saved.url; delete saved.key;
+      localStorage.setItem('ridecomp_cfg', JSON.stringify(saved));
+    }
   } catch(e) { console.warn('Config load error', e); }
 }
 
@@ -2052,7 +2059,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   } catch(e) { console.warn('IndexedDB unavailable, running in-memory', e); idb=null; loader(false); }
 
   refresh();
-  if (cfg.url && cfg.key) initSupabase();
+  initSupabase();   // always: also completes a GitHub sign-in redirect landing on this page
 
   console.log(`RideMap v${VER} ready.`);
 });
