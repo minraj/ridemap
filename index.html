@@ -2,286 +2,237 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>RideComp — Garmin Ride Comparator</title>
-  <meta name="description" content="Compare multiple Garmin .fit and .gpx rides with map overlay, elevation, HR, speed charts and training analytics."/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover"/>
+  <meta name="theme-color" content="#0F172A"/>
+  <title>RideMap — Ride tracker &amp; comparator</title>
+  <meta name="description" content="Visualize, analyze and compare your GPX and FIT cycling rides on an interactive map."/>
 
-  <!-- Anti-FOUC: apply stored theme before first paint -->
-  <script>
-    (function () {
-      var t = localStorage.getItem('ridecomp_theme');
-      if (!t) t = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-      document.documentElement.setAttribute('data-theme', t);
-    })();
-  </script>
-
-  <!-- Leaflet & Chart.js -->
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
 
-  <!-- Typography: Plus Jakarta Sans (UI) + Fira Code (data) -->
   <link rel="preconnect" href="https://fonts.googleapis.com"/>
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
-  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:ital,wght@0,400;0,500;0,600;0,700;0,800;1,700&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet"/>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400..800&display=swap" rel="stylesheet"/>
 
   <link rel="stylesheet" href="assets/style.css"/>
-  <link rel="stylesheet" href="assets/ridemap-patch.css"/>
 </head>
 <body>
 
-<!-- ═══ MAP — full-bleed canvas ══════════════════════════════════════ -->
-<div id="map"></div>
+<!-- ═══ MAP — full-screen base layer ══════════════════════════════════ -->
+<div id="map" aria-label="Map"></div>
 
-<!-- ═══ FLOATING TOOLBAR — top center pill ════════════════════════════ -->
-<div id="topbar">
-  <div class="tb-brand">
-    <span class="logo">Ride<em>Comp</em></span>
-    <span class="tb-sep-v"></span>
-    <span class="chip" id="chip-count">0 rides</span>
-    <span class="chip on"   id="chip-live"    style="display:none">● comparing</span>
-    <span class="chip warn" id="chip-unsaved" style="display:none">● unsaved</span>
-    <span class="chip"      id="chip-user"    style="display:none"></span>
+<!-- ═══ MAP CONTROL CLUSTER — top right ═══════════════════════════════ -->
+<div id="map-ctrl">
+  <div class="ctrl-group">
+    <button class="ctrl-btn" id="btn-layers" data-icon="layers" title="Basemap" aria-haspopup="true" onclick="toggleLayerMenu()"></button>
   </div>
-  <div class="tb-div"></div>
-  <div class="tbr">
-    <button class="btn ghost tb-icon" id="btn-admin"  style="display:none" onclick="openAdmin()"              title="Admin">👥</button>
-    <button class="btn ghost tb-icon" id="btn-mob-sb" style="display:none" onclick="toggleMobPanel('sidebar')" title="Rides">☰</button>
-    <button class="btn ghost tb-icon" id="btn-mob-st" style="display:none" onclick="toggleMobPanel('sp')"      title="Stats">📊</button>
-    <button class="btn ghost tb-icon" title="Toggle light/dark (Ctrl+K)" onclick="toggleTheme()">◑</button>
-    <button class="btn ghost tb-icon" title="Keyboard shortcuts"          onclick="openHelp()">⌨</button>
-    <button class="btn ghost tb-icon" title="Settings"                    onclick="openSettings()">⚙</button>
-    <div class="tb-div"></div>
-    <button class="btn" id="btn-sync" style="display:none" onclick="syncToSupabase()">↑ Sync</button>
-    <button class="btn" onclick="clearAll()">Clear</button>
-    <button class="btn primary" onclick="document.getElementById('fi').click()">+ Import</button>
-    <input type="file" id="fi" multiple accept=".fit,.gpx,.FIT,.GPX" onchange="handleFiles(this.files)"/>
+  <div class="ctrl-group">
+    <button class="ctrl-btn" data-icon="plus"  title="Zoom in"  onclick="map.zoomIn()"></button>
+    <button class="ctrl-btn" data-icon="minus" title="Zoom out" onclick="map.zoomOut()"></button>
+  </div>
+  <div class="ctrl-group">
+    <button class="ctrl-btn" id="btn-locate" data-icon="locate" title="Locate me" onclick="locateMe()"></button>
+    <button class="ctrl-btn" id="btn-fs" data-icon="expand" title="Fullscreen" onclick="toggleFullscreen()"></button>
+  </div>
+
+  <div id="layer-menu" class="glass" role="menu" hidden>
+    <div class="menu-title">Basemap</div>
+    <div id="layer-opts" class="layer-grid"></div>
+    <div id="layer-note" class="menu-note"></div>
   </div>
 </div>
 
-<!-- ═══ LEFT PANEL — rides ═══════════════════════════════════════════ -->
-<div id="sidebar" data-sb-state="expanded">
-  <!-- Legacy toggles (hidden, superseded by patch) -->
-  <button class="collapse-btn" style="display:none"></button>
-  <button class="toggle-btn"   style="display:none"></button>
-  <button class="btn ghost mob-close" onclick="toggleMobPanel('sidebar')" title="Close">✕</button>
+<!-- Desktop: re-open tab when the sidebar is collapsed -->
+<button id="panel-reopen" class="glass" data-icon="panel" title="Show panel" onclick="setPanelCollapsed(false)"></button>
 
-  <!-- Panel header — optional hero image via image_437f98.jpg background -->
-  <div class="ph">
-    <div class="panel-header-inner">
-      <div class="panel-wordmark sb-full-only">
-        <span class="panel-logo">Ride<em>Comp</em></span>
-        <span class="panel-tagline">Ride Comparator</span>
-      </div>
-      <div class="ph-row">
-        <span class="pt sb-full-only">Rides</span>
-        <span id="rc-lbl" class="rc-count sb-full-only">0</span>
-        <button class="btn ghost sb-full-only pill-btn" onclick="showAllRides()" title="Show all rides">All</button>
-        <label class="multi-label sb-full-only">
-          <input type="checkbox" id="multi-select-toggle" onchange="toggleMultiSelect(this.checked)">
-          <span>Multi</span>
-        </label>
-      </div>
+<!-- ═══ SIDEBAR (desktop) / BOTTOM SHEET (mobile) ═══════════════════════ -->
+<aside id="panel" class="glass" data-sheet="half">
+  <div class="sheet-handle" id="sheet-handle" aria-label="Drag to resize"><span></span></div>
+
+  <header class="panel-head">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 32 32"><path d="M3 24 11 12l5 7 4-5 9 10z" fill="currentColor" opacity=".35"/><path d="M3 24 11 12l5 7 4-5 9 10" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"/><circle cx="23" cy="8" r="3" fill="currentColor"/></svg>
+      </span>
+      <span class="brand-name">Ride<em>Map</em></span>
     </div>
-  </div>
-
-  <!-- Rides list -->
-  <div id="rides-list">
-    <div id="sb-empty" class="empty">
-      <div class="ei">🚴</div>
-      <div class="et sb-full-only">No rides loaded</div>
-      <div class="es sb-full-only">Drop .fit or .gpx files below,<br>or click Import above</div>
+    <div class="head-actions">
+      <span class="pill warn" id="chip-unsaved" hidden title="Rides not yet synced to the cloud">unsynced</span>
+      <button class="icon-btn" id="btn-sync"  data-icon="cloud" title="Sync to cloud (Ctrl+S)" onclick="syncToSupabase()" hidden></button>
+      <button class="icon-btn" id="btn-admin" data-icon="users" title="Admin" onclick="openAdmin()" hidden></button>
+      <button class="icon-btn desk-only" data-icon="panel" title="Collapse panel" onclick="setPanelCollapsed(true)"></button>
+      <button class="avatar" id="btn-avatar" title="Account &amp; settings" onclick="openSettings()"></button>
     </div>
-  </div>
+  </header>
 
-  <!-- Drop zone -->
-  <div id="dz" onclick="document.getElementById('fi').click()"
-       ondragover="onDragOver(event)" ondragleave="onDragLeave(event)" ondrop="onDrop(event)">
-    <div class="dz-icon">📂</div>
-    <div class="dz1 sb-full-only">Drop files here</div>
-    <div class="dz2 sb-full-only">.fit or .gpx · multiple OK</div>
-  </div>
+  <button class="btn primary upload-btn" onclick="openFilePicker()"><span data-icon="plus"></span>Upload GPX / FIT</button>
+  <input type="file" id="fi" multiple accept=".fit,.gpx,.FIT,.GPX" hidden onchange="handleFiles(this.files)"/>
 
-  <!-- DB status badge -->
-  <div id="db-badge" onclick="openSettings()">
-    <div id="dbdot"></div>
-    <span id="dblbl" class="sb-full-only">Local storage only</span>
-  </div>
-</div>
-
-<!-- ═══ RIGHT PANEL — stats / vitals ═════════════════════════════════ -->
-<div id="sp">
-  <button class="collapse-btn" style="display:none"></button>
-  <button class="toggle-btn"   style="display:none"></button>
-  <button class="btn ghost mob-close" onclick="toggleMobPanel('sp')" title="Close">✕</button>
-
-  <div class="stabs">
-    <div class="stab on" onclick="setTab('compare',this)">Compare</div>
-    <div class="stab"    onclick="setTab('vitals',this)">Vitals</div>
-    <div class="stab"    onclick="setTab('plan',this)">Plan</div>
-    <div class="stab"    onclick="setTab('segments',this)">Segments</div>
-  </div>
-  <div id="sb">
-    <div id="st-empty" class="empty">
-      <div class="ei">📊</div>
-      <div class="et">No data yet</div>
-      <div class="es">Import rides to compare stats<br>and plan training</div>
+  <!-- VIEW: activity feed -->
+  <section class="view" id="view-list">
+    <div class="filters">
+      <label class="search">
+        <span data-icon="search"></span>
+        <input id="q" type="search" placeholder="Search rides" autocomplete="off" oninput="setFilter('q', this.value)"/>
+      </label>
+      <label class="select">
+        <span data-icon="calendar"></span>
+        <select id="range" onchange="setFilter('range', this.value)" aria-label="Date range">
+          <option value="all">All time</option>
+          <option value="7">7 days</option>
+          <option value="30">30 days</option>
+          <option value="90">90 days</option>
+          <option value="365">12 months</option>
+        </select>
+      </label>
     </div>
-  </div>
-</div>
-
-<!-- ═══ BOTTOM PANEL — elevation / HR / speed profile ════════════════ -->
-<div id="cs">
-  <div class="csh">
-    <span class="cst">Profile</span>
-    <div class="cts">
-      <button class="ct on" onclick="setChart('elevation',this)">Elevation</button>
-      <button class="ct"    onclick="setChart('hr',this)">Heart Rate</button>
-      <button class="ct"    onclick="setChart('speed',this)">Speed</button>
-      <button class="ct"    onclick="setChart('cadence',this)">Cadence</button>
-      <button class="ct"    onclick="setChart('power',this)">Power</button>
+    <div class="feed-bar">
+      <span class="feed-count" id="feed-count">0 rides</span>
+      <button class="chip-btn" id="btn-compare-mode" onclick="toggleCompareMode()"><span data-icon="columns"></span>Compare</button>
     </div>
-  </div>
-  <div id="cw"><canvas id="pc"></canvas></div>
-</div>
+    <div id="feed" class="feed" role="list"></div>
+    <div id="feed-empty" class="empty">
+      <div class="empty-art" data-icon="route"></div>
+      <div class="empty-title">No rides yet</div>
+      <div class="empty-sub">Drop .gpx or .fit files anywhere on the map, or use <b>Upload</b>.</div>
+    </div>
+    <div class="compare-bar" id="compare-bar" hidden>
+      <span id="compare-count">0 selected</span>
+      <button class="btn primary sm" id="btn-compare-go" onclick="openCompare()">Compare</button>
+    </div>
+  </section>
 
-<!-- ═══ MAP CONTROLS — tile selector ════════════════════════════════ -->
-<div id="mc">
-  <button class="mb"    onclick="setTile('light',this)">Light</button>
-  <button class="mb on" onclick="setTile('dark',this)">Dark</button>
-  <button class="mb"    onclick="setTile('sat',this)">Satellite</button>
-  <button class="mb"    onclick="setTile('topo',this)">Topo</button>
-  <button class="mb"    onclick="setTile('street',this)">Street</button>
-</div>
+  <!-- VIEW: activity detail -->
+  <section class="view" id="view-detail" hidden></section>
 
-<!-- ═══ MAP HOVER LABEL ══════════════════════════════════════════════ -->
-<div id="mhl"></div>
+  <!-- VIEW: compare -->
+  <section class="view" id="view-compare" hidden></section>
 
-<!-- ═══ MOBILE OVERLAY ══════════════════════════════════════════════ -->
-<div class="mob-overlay" id="mob-overlay" onclick="closeAllPanels()"></div>
+  <footer class="panel-foot">
+    <button class="db-badge" id="db-badge" onclick="openSettings()"><i id="dbdot"></i><span id="dblbl">Local storage only</span></button>
+    <button class="link-btn" onclick="openHelp()">Shortcuts</button>
+  </footer>
+</aside>
 
-<!-- ═══ SETTINGS / AUTH MODAL ═══════════════════════════════════════ -->
-<div id="mb" onclick="closeModalBg(event)">
-<div class="modal" id="modal-inner">
+<!-- Drop overlay -->
+<div id="drop" hidden><div class="drop-card glass"><span data-icon="upload"></span>Drop GPX / FIT files to import</div></div>
 
-  <!-- AUTH VIEW -->
+<!-- ═══ SETTINGS / ACCOUNT MODAL ════════════════════════════════════════ -->
+<div class="modal-bg" id="mb" onclick="closeModalBg(event)">
+<div class="modal glass" role="dialog" aria-labelledby="mt-settings">
+  <button class="icon-btn modal-x" data-icon="x" title="Close" onclick="closeSettings()"></button>
+
+  <!-- Signed out: sign in / request access -->
   <div id="view-auth">
-    <div class="mt">Sign in to RideComp</div>
-    <div class="ms">Sync rides across devices. Family plan: each member's data is stored separately.</div>
-    <div class="auth-provider-btns">
+    <h2 class="modal-title" id="mt-settings">Sign in to RideMap</h2>
+    <p class="modal-sub">Sync rides across devices. Each member's rides are stored separately.</p>
+    <div class="auth-btns">
       <button class="auth-btn" onclick="authWith('github')">
         <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.531 1.032 1.531 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z"/></svg>
-        Continue with GitHub
+        GitHub
       </button>
       <button class="auth-btn" onclick="authWith('google')">
         <svg viewBox="0 0 24 24"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/></svg>
-        Continue with Google
+        Google
       </button>
       <button class="auth-btn" onclick="authWith('facebook')">
         <svg viewBox="0 0 24 24" fill="#1877F2"><path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z"/></svg>
-        Continue with Facebook
+        Facebook
       </button>
     </div>
-    <div class="auth-divider">or request access</div>
-    <div class="fr"><label class="fl">Full name</label><input class="fi2" id="reg-name" placeholder="Your name"/></div>
-    <div class="fr"><label class="fl">Email</label><input class="fi2" id="reg-email" type="email" placeholder="you@example.com"/></div>
-    <div class="fr">
-      <label class="fl">Password</label>
-      <input class="fi2" id="reg-pass" type="password" placeholder="min 8 characters"/>
-      <div class="fh">Access requires admin approval. Unconfirmed requests expire in 24 hours.</div>
+    <div class="divider"><span>or use email</span></div>
+    <div class="field"><label for="reg-name">Full name <small>(for access requests)</small></label><input id="reg-name" placeholder="Your name" autocomplete="name"/></div>
+    <div class="field"><label for="reg-email">Email</label><input id="reg-email" type="email" placeholder="you@example.com" autocomplete="email"/></div>
+    <div class="field">
+      <label for="reg-pass">Password</label>
+      <input id="reg-pass" type="password" placeholder="min 8 characters" autocomplete="current-password"/>
+      <div class="hint">New accounts need admin approval. Unapproved requests expire after 24 hours.</div>
     </div>
-    <div class="ma">
-      <button class="btn ghost" onclick="closeSettings()">Cancel</button>
-      <button class="btn" onclick="signInPassword()">Sign in</button>
-      <button class="btn primary" onclick="requestAccess()">Request access</button>
-    </div>
-  </div>
-
-  <!-- SETTINGS VIEW -->
-  <div id="view-settings" style="display:none">
-    <div class="mt">Settings</div>
-    <div class="ms">Configure Supabase sync and manage your data.</div>
-    <div id="view-config">
-      <div class="mst">Training zones</div>
-      <div class="fr">
-        <label class="fl">Max HR for zone calculation</label>
-        <input class="fi2" id="cfg-maxhr" type="number" placeholder="190" value="190"/>
-      </div>
-    </div>
-    <div id="view-user-settings" style="display:none">
-      <div class="msec">
-        <div class="mst">Local database</div>
-        <div style="display:flex;gap:7px;flex-wrap:wrap">
-          <button class="btn" onclick="exportJSON()">↓ Export JSON</button>
-          <button class="btn" onclick="document.getElementById('json-in').click()">↑ Import JSON</button>
-          <button class="btn" onclick="exportGPX()">↓ Export GPX</button>
-          <button class="btn dbtn" onclick="nukeDB()">🗑 Clear local DB</button>
-        </div>
-        <input type="file" id="json-in" accept=".json" style="display:none" onchange="importJSON(this)"/>
-      </div>
-    </div>
-    <div class="ma">
-      <button class="btn dbtn" id="btn-sign-out" onclick="signOut()" style="display:none">Sign out</button>
-      <button class="btn ghost" onclick="closeSettings()">Close</button>
-      <button class="btn primary" onclick="saveSettings()">Save</button>
+    <div class="modal-actions">
+      <button class="btn" onclick="requestAccess()">Request access</button>
+      <button class="btn primary" onclick="signInPassword()">Sign in</button>
     </div>
   </div>
 
-</div>
-</div>
+  <!-- Signed in: account header -->
+  <div id="view-account" hidden>
+    <h2 class="modal-title">Account</h2>
+    <div class="account-row">
+      <span class="avatar lg" id="account-avatar"></span>
+      <div><div class="account-name" id="account-name"></div><div class="account-email" id="account-email"></div></div>
+      <button class="btn danger sm" id="btn-sign-out" onclick="signOut()">Sign out</button>
+    </div>
+  </div>
 
-<!-- ═══ ADMIN PANEL MODAL ════════════════════════════════════════════ -->
-<div id="admin-mb" onclick="closeAdminBg(event)" style="position:fixed;inset:0;background:rgba(0,0,0,.72);z-index:810;display:none;align-items:center;justify-content:center;backdrop-filter:blur(4px)">
-<div class="modal" style="width:520px">
-  <div class="mt">👥 Admin — Access Requests</div>
-  <div class="ms">Manage family member registration requests. Pending requests auto-delete after 24h.</div>
-  <div id="admin-list"><div class="empty" style="height:80px"><div class="es">Loading…</div></div></div>
-  <div class="ma">
-    <button class="btn ghost" onclick="document.getElementById('admin-mb').style.display='none'">Close</button>
-    <button class="btn" onclick="loadAdminData()">↻ Refresh</button>
+  <!-- Settings — always visible -->
+  <div class="modal-section">
+    <h3 class="section-title">Training</h3>
+    <div class="field inline"><label for="cfg-maxhr">Max heart rate (for HR zones)</label><input id="cfg-maxhr" type="number" min="100" max="240" placeholder="190"/></div>
+  </div>
+
+  <details class="modal-section">
+    <summary class="section-title">Connections</summary>
+    <div class="field"><label for="cfg-sb-url">Supabase URL</label><input id="cfg-sb-url" placeholder="https://xxxx.supabase.co" autocomplete="off"/></div>
+    <div class="field"><label for="cfg-sb-key">Supabase anon / publishable key</label><input id="cfg-sb-key" placeholder="sb_publishable_…" autocomplete="off"/></div>
+    <div class="field"><label for="cfg-maptiler">MapTiler key <small>(optional)</small></label><input id="cfg-maptiler" placeholder="Leave empty to use free OpenStreetMap tiles" autocomplete="off"/></div>
+    <div class="field"><label for="cfg-mapbox">Mapbox token <small>(optional, used if no MapTiler key)</small></label><input id="cfg-mapbox" placeholder="pk.…" autocomplete="off"/></div>
+  </details>
+
+  <div class="modal-section">
+    <h3 class="section-title">Data</h3>
+    <div class="btn-row">
+      <button class="btn sm" onclick="exportJSON()"><span data-icon="download"></span>Backup JSON</button>
+      <button class="btn sm" onclick="document.getElementById('json-in').click()"><span data-icon="upload"></span>Restore JSON</button>
+      <button class="btn sm" onclick="exportGPX()"><span data-icon="download"></span>Export all GPX</button>
+      <button class="btn sm danger" onclick="clearAll()"><span data-icon="trash"></span>Delete all rides</button>
+    </div>
+    <input type="file" id="json-in" accept=".json" hidden onchange="importJSON(this)"/>
+  </div>
+
+  <div class="modal-actions">
+    <button class="btn ghost" onclick="closeSettings()">Cancel</button>
+    <button class="btn primary" onclick="saveSettings()">Save settings</button>
   </div>
 </div>
 </div>
 
-<!-- ═══ HELP MODAL ════════════════════════════════════════════════════ -->
-<div id="help-mb" onclick="closeHelpBg(event)" style="position:fixed;inset:0;background:rgba(0,0,0,.72);z-index:810;display:none;align-items:center;justify-content:center;backdrop-filter:blur(4px)">
-<div class="modal" style="width:420px">
-  <div class="mt">Keyboard Shortcuts</div>
-  <div class="ms">Quick keys to speed up your workflow.</div>
-  <div class="fr">
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:11px">
-      <div style="display:flex;gap:6px;align-items:center"><kbd style="background:var(--bg4);padding:2px 6px;border-radius:3px;border:1px solid var(--ln)">Ctrl+O</kbd> Import rides</div>
-      <div style="display:flex;gap:6px;align-items:center"><kbd style="background:var(--bg4);padding:2px 6px;border-radius:3px;border:1px solid var(--ln)">Ctrl+K</kbd> Toggle theme</div>
-      <div style="display:flex;gap:6px;align-items:center"><kbd style="background:var(--bg4);padding:2px 6px;border-radius:3px;border:1px solid var(--ln)">Ctrl+S</kbd> Sync to cloud</div>
-      <div style="display:flex;gap:6px;align-items:center"><kbd style="background:var(--bg4);padding:2px 6px;border-radius:3px;border:1px solid var(--ln)">Ctrl+D</kbd> Clear all</div>
-      <div style="display:flex;gap:6px;align-items:center"><kbd style="background:var(--bg4);padding:2px 6px;border-radius:3px;border:1px solid var(--ln)">Esc</kbd> Close modals</div>
-      <div style="display:flex;gap:6px;align-items:center"><kbd style="background:var(--bg4);padding:2px 6px;border-radius:3px;border:1px solid var(--ln)">↑↓</kbd> Navigate rides</div>
-    </div>
-  </div>
-  <div class="ma">
-    <button class="btn ghost" onclick="document.getElementById('help-mb').style.display='none'">Close</button>
+<!-- ═══ ADMIN MODAL ═════════════════════════════════════════════════════ -->
+<div class="modal-bg" id="admin-mb" onclick="closeAdminBg(event)">
+<div class="modal glass wide" role="dialog">
+  <button class="icon-btn modal-x" data-icon="x" title="Close" onclick="closeAdmin()"></button>
+  <h2 class="modal-title">Access requests</h2>
+  <p class="modal-sub">Approve or deny registrations. Pending requests auto-delete after 24h.</p>
+  <div id="admin-list"><div class="note">Loading…</div></div>
+  <div class="modal-actions">
+    <button class="btn" onclick="loadAdminData()">Refresh</button>
   </div>
 </div>
 </div>
 
-<!-- LOADER -->
-<div id="ldr"><div class="ls"></div><div class="lm" id="lm">Processing…</div></div>
-<!-- TOAST -->
-<div id="toast"></div>
+<!-- ═══ HELP MODAL ══════════════════════════════════════════════════════ -->
+<div class="modal-bg" id="help-mb" onclick="closeHelpBg(event)">
+<div class="modal glass" role="dialog">
+  <button class="icon-btn modal-x" data-icon="x" title="Close" onclick="closeHelp()"></button>
+  <h2 class="modal-title">Keyboard shortcuts</h2>
+  <div class="kbd-grid">
+    <kbd>Ctrl O</kbd><span>Upload rides</span>
+    <kbd>/</kbd><span>Search rides</span>
+    <kbd>↑ ↓</kbd><span>Move between rides</span>
+    <kbd>Esc</kbd><span>Back / close</span>
+    <kbd>B</kbd><span>Cycle basemap</span>
+    <kbd>Ctrl S</kbd><span>Sync to cloud</span>
+    <kbd>?</kbd><span>This help</span>
+  </div>
+</div>
+</div>
+
+<div id="ldr"><div class="spinner"></div><div id="lm">Processing…</div></div>
+<div id="toast" role="status" aria-live="polite"></div>
 
 <script src="assets/config.js"></script>
 <script src="assets/script.js"></script>
 <script src="assets/exportGPX.js"></script>
-<!-- Register CartoDB Positron as 'light' tile (TILES const is mutable) -->
-<script>
-  if (typeof TILES !== 'undefined') {
-    TILES.light = [
-      'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',
-      '© OpenStreetMap contributors © CARTO'
-    ];
-  }
-</script>
-<script src="assets/ridemap-patch.js"></script>
 </body>
 </html>

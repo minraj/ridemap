@@ -1,9 +1,9 @@
-# RideComp — Garmin Ride Comparator
+# RideMap — ride tracker & comparator
 
-> A production-grade, zero-dependency web app for comparing multiple Garmin rides — built for cyclists who want more than Garmin Connect offers.
+> A zero-build web app for visualizing, analyzing and comparing GPX / FIT rides on an interactive map — built for mountain bikers and cyclists who want more than Garmin Connect offers.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-![Version](https://img.shields.io/badge/version-1.4.0-blue)
+![Version](https://img.shields.io/badge/version-2.0.0-blue)
 ![No build step](https://img.shields.io/badge/build-none-lightgrey)
 
 ---
@@ -12,6 +12,24 @@
 
 | Feature | Details |
 |---|---|
+| **FIT import** | Native binary parser — records, laps, HR / cadence / power / speed, no external library |
+| **GPX import** | Tracks, routes, waypoints; Garmin TrackPointExtension HR/cadence/power; gpx.studio exports; track name used as ride name |
+| **Free basemaps** | Standard (OSM), Topo (OpenTopoMap), Satellite (Esri), Dark — no API key needed |
+| **Optional premium tiles** | MapTiler key or Mapbox token in Settings / `config.js`; automatic fallback to free tiles if the key is rejected |
+| **Activity feed** | Route thumbnails, distance, elevation gain, moving time; search and date-range filter |
+| **Activity detail** | Distance, elevation gain, avg speed, max gradient, moving time, duration, HR zones, laps, more metrics |
+| **Profile chart ↔ map sync** | Elevation / speed / HR / cadence / power; hovering the chart moves a telemetry marker on the map and vice-versa |
+| **Compare** | Overlay charts, metric bars, training insights and shared-segment detection for 2+ rides |
+| **Export** | Per-ride GPX and FIT export, JSON backup / restore |
+| **Performance** | Ramer-Douglas-Peucker simplification for map polylines, canvas rendering, single-pass GPX parsing |
+| **Responsive** | Glass sidebar on desktop (collapsible), draggable bottom sheet on mobile (< 768px) |
+| **Map tools** | Basemap switcher, locate me, zoom, fullscreen, drag-and-drop files anywhere |
+| **Local database** | IndexedDB persistence — rides survive page refreshes |
+| **Supabase sync** | Optional cloud sync with GitHub / Google / Facebook / email sign-in |
+| **Registration with approval** | New users request access → admin approves/denies → pending requests auto-delete after 24h |
+| **Per-user data isolation** | Each member's rides stored under their own user_id |
+
+---|---|
 | **FIT import** | Native binary parser — no external library, tested on real Garmin ACTIVITY.fit |
 | **GPX import** | Full GPX support: tracks, routes, waypoints. Garmin TrackPointExtension HR/cadence. Works with gpx.studio exports |
 | **Multi-ride overlay** | All routes drawn simultaneously in unique colours |
@@ -40,7 +58,7 @@ python3 -m http.server 8080
 # open http://localhost:8080
 ```
 
-Then drag `.fit` or `.gpx` files onto the drop zone, or click **Import**.
+Then drag `.fit` or `.gpx` files anywhere onto the map, or click **Upload GPX / FIT**.
 
 ### Export files from Garmin Connect
 
@@ -51,7 +69,7 @@ Then drag `.fit` or `.gpx` files onto the drop zone, or click **Import**.
 
 1. Design your route at [gpx.studio](https://gpx.studio)
 2. File → Export → GPX
-3. Drop the file into RideComp
+3. Drop the file into RideMap
 
 ---
 
@@ -68,7 +86,7 @@ Then in Cloudflare dashboard:
 - Build output directory: `/`
 - Deploy
 
-Every `git push` auto-deploys. Live at `https://ridecomp.pages.dev`.
+Every `git push` auto-deploys. Live at `https://<your-project>.pages.dev`.
 
 ---
 
@@ -118,11 +136,15 @@ $$;
 
 Supabase → Authentication → Providers → enable GitHub / Google / Facebook and add your OAuth app credentials from each provider's developer console.
 
-### 4. Configure RideComp
+### 4. Configure RideMap
 
-In RideComp → ⚙ Settings:
-- **Project URL**: Supabase → Settings → API → Project URL
-- **Anon key**: Supabase → Settings → API → anon public key
+Either copy `assets/config.example.js` to `assets/config.js` (gitignored) and fill it in, or open
+RideMap → avatar → **Settings → Connections**:
+- **Supabase URL**: Supabase → Settings → API → Project URL
+- **Supabase key**: Supabase → Settings → API → anon / publishable key
+
+Values entered in Settings are stored in the browser (localStorage), so a deployment without
+`config.js` still works — each user enters the connection once.
 
 ### 5. Promote yourself to admin
 
@@ -132,7 +154,7 @@ update ridecomp_users set role = 'admin'
 where email = 'your@email.com';
 ```
 
-Then the **Admin** button appears in the top bar after signing in.
+Then the **Admin** button appears in the panel header after signing in.
 
 ---
 
@@ -140,7 +162,7 @@ Then the **Admin** button appears in the top bar after signing in.
 
 1. You sign up and are auto-promoted to admin (or manually via SQL above)
 2. Family members visit your hosted URL and click **Request access**
-3. You review requests in the **Admin panel** (top bar) and click ✓ Approve
+3. You review requests in the **Admin panel** (panel header) and click Approve
 4. Approved members can sign in — their rides are stored under their own `user_id`
 5. Unapproved requests auto-delete after 24 hours
 
@@ -150,24 +172,44 @@ Then the **Admin** button appears in the top bar after signing in.
 
 | Shortcut | Action |
 |---|---|
-| `Ctrl/Cmd + O` | Import files |
-| `Escape` | Close modal |
+| `Ctrl/Cmd + O` | Upload files |
+| `/` | Search rides |
+| `↑ / ↓` | Move between rides (feed or detail view) |
+| `B` | Cycle basemap |
+| `Ctrl/Cmd + S` | Sync to cloud |
+| `Escape` | Close modal / go back |
+| `?` | Shortcut help |
+
+---
+
+## 🗺️ Map tiles
+
+The default basemaps need no API key. CARTO basemaps (`basemaps.cartocdn.com`) are **not** used:
+they now return an "API KEY REQUIRED" placeholder image for every tile.
+
+For premium styles, add a key under Settings → Connections (or in `config.js`):
+
+| Setting | Used for |
+|---|---|
+| `mapTilerKey` | MapTiler outdoor / topo / satellite / dark styles |
+| `mapboxToken` | Mapbox outdoors / satellite / dark styles (if no MapTiler key) |
+
+Keys are checked when the map loads; an invalid key falls back to the free tiles with a notice.
 
 ---
 
 ## 📁 Project structure
 
 ```
-ridecomp/
-├── index.html
+ridemap/
+├── index.html              layout: map, control cluster, panel/sheet, modals
 ├── assets/
-│   ├── script.js
-│   ├── style.css
-│   ├── ridemap-patch.js
-│   ├── ridemap-patch.css
-│   ├── exportGPX.js
-│   └── config.js
-├── _headers
+│   ├── script.js           app logic: parsers, stats, map, rendering, auth, sync
+│   ├── exportGPX.js        GPX / FIT export, shared-segment detection
+│   ├── style.css           dark glass theme, responsive layout
+│   ├── config.example.js   template for config.js
+│   └── config.js           your keys (gitignored)
+├── data/sample_ride.gpx
 ├── .gitignore
 ├── LICENSE
 └── README.md
@@ -181,16 +223,14 @@ No `node_modules`. No build step. No framework.
 
 ```
 index.html
-├── CSS tokens & layout
-├── FIT parser     — pure binary JS, field 78 enhanced_altitude, speed from dist/time
-├── GPX parser     — DOMParser + XPath extension namespace traversal
-├── IndexedDB      — local persistence, JSON import/export
-├── Leaflet        — multi-polyline map, hover crosshair marker
-├── Chart.js       — elevation/HR/speed/cadence/power overlay charts
-├── Stats engine   — haversine, HR zones Z1-Z5, TSS, efficiency metrics
-├── Supabase JS    — OAuth (GitHub/Google/FB), email auth, rides sync
-├── Auth flow      — sign in, request access, admin approval, 24h expiry
-└── Admin panel    — pending/approve/deny registration management
+├── Leaflet           full-screen map, canvas-rendered routes, basemap switcher
+├── FIT parser        pure binary JS — records (msg 20) + laps (msg 19)
+├── GPX parser        DOMParser, single pass over each point's extension elements
+├── Geometry          haversine, RDP simplification, smoothed gradient, moving time
+├── Chart.js          profile charts with chart ↔ map hover sync
+├── IndexedDB         local persistence, JSON import/export
+├── Supabase JS       OAuth (GitHub/Google/FB), email auth, rides sync
+└── Admin panel       pending/approve/deny registration management
 ```
 
 ---
@@ -203,7 +243,6 @@ Issues and PRs welcome! Ideas for contributors:
 - [x] GPX export of loaded rides
 - [ ] Strava import via OAuth
 - [x] Mobile responsive layout
-- [x] Light theme
 - [x] Lap data from FIT files
 
 ---
@@ -217,4 +256,4 @@ MIT — free to use, modify, and distribute. See [LICENSE](LICENSE).
 ## 🙏 Credits
 
 [Leaflet](https://leafletjs.com) · [Chart.js](https://chartjs.org) · [Supabase](https://supabase.com)  
-Map tiles: [CARTO](https://carto.com) · [OpenStreetMap](https://openstreetmap.org) · [Esri](https://esri.com) · [OpenTopoMap](https://opentopomap.org)
+Map tiles: [OpenStreetMap](https://openstreetmap.org) · [OpenTopoMap](https://opentopomap.org) · [Esri](https://esri.com) · optional [MapTiler](https://maptiler.com) / [Mapbox](https://mapbox.com)

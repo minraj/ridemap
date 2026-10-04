@@ -2,52 +2,101 @@
 /* ═══════════════════════════════════════════════════════════════
    CONSTANTS
  ═══════════════════════════════════════════════════════════════ */
-const VER = '1.4.0';
-const IDB_NAME = 'ridecomp_v1';
+const VER = '2.0.0';
+const IDB_NAME = 'ridecomp_v1';          // kept from RideComp so existing rides survive
 const IDB_STORE = 'rides';
-const COLORS = ['#8fd44a','#4ac8d4','#d4944a','#b44ad4','#d44a7a','#4ad494','#d4d44a','#4a78d4','#d4504a'];
+const STATS_VER = 2;                     // bump to force stats recompute on load
+const COLORS = ['#F97316','#06B6D4','#A3E635','#E879F9','#FACC15','#38BDF8','#FB7185','#34D399','#C084FC'];
 const FIT_EPOCH = 631065600; // seconds from Unix epoch to FIT epoch (1989-12-31)
 const SEMICIRCLE = 180.0 / Math.pow(2, 31);
 const HR_ZONES = [
-  {name:'Z1 Rest',   maxPct:.60, color:'#4ac8d4'},
-  {name:'Z2 Easy',   maxPct:.70, color:'#8fd44a'},
-  {name:'Z3 Aerobic',maxPct:.80, color:'#d4d44a'},
-  {name:'Z4 Tempo',  maxPct:.90, color:'#d4944a'},
-  {name:'Z5 Max',    maxPct:1.0, color:'#d44a7a'},
+  {name:'Z1 Recovery', maxPct:.60, color:'#38BDF8'},
+  {name:'Z2 Endurance',maxPct:.70, color:'#22C55E'},
+  {name:'Z3 Tempo',    maxPct:.80, color:'#FACC15'},
+  {name:'Z4 Threshold',maxPct:.90, color:'#F97316'},
+  {name:'Z5 Max',      maxPct:1.0, color:'#EF4444'},
 ];
+const SIMPLIFY_M     = 4;    // Ramer-Douglas-Peucker tolerance for map polylines (metres)
+const CHART_POINTS   = 600;  // max samples per chart dataset
+const GRADE_WINDOW_M = 100;  // distance window for max-gradient (smooths GPS elevation noise)
+const MOBILE_MQ = window.matchMedia('(max-width: 767px)');
 
-/* ═══════════════════════════════════════════════════════════════
-   FEATURE FLAGS
-   Set ENABLE_DIFFICULTY_SEGMENTS = true to restore the orange
-   steep-climb overlay. Currently disabled: it breaks on tile
-   switches and creates visual clutter on multi-route comparisons.
- ═══════════════════════════════════════════════════════════════ */
-const ENABLE_DIFFICULTY_SEGMENTS = false;
+const METRICS = {
+  elevation: {key:'ele',   label:'Elevation', unit:'m',    dp:0},
+  speed:     {key:'speed', label:'Speed',     unit:'km/h', dp:1},
+  hr:        {key:'hr',    label:'Heart rate',unit:'bpm',  dp:0, has:'hasHR', short:'HR'},
+  cadence:   {key:'cad',   label:'Cadence',   unit:'rpm',  dp:0, has:'hasCad'},
+  power:     {key:'power', label:'Power',     unit:'W',    dp:0, has:'hasPower'},
+};
 
 /* ═══════════════════════════════════════════════════════════════
    STATE
  ═══════════════════════════════════════════════════════════════ */
-let rides       = [];
-let selectedIds = new Set();   // Set of active route IDs
-let lastSelectedId = null;     // The "Primary" route for ghosting
-let multiSelectMode = false;   // Controlled by UI toggle
-let map, tileLayer, profileChart, hoverMarker;
-
-let currentTile = 'dark';
-let currentChart = 'elevation';
-let currentTab   = 'compare';
+let rides        = [];
+let view         = 'list';      // 'list' | 'detail' | 'compare'
+let activeId     = null;        // ride shown in the detail view
+let compareMode  = false;       // feed cards act as checkboxes
+let compareIds   = new Set();
+let compareTab   = 'metrics';
+let chartMetric  = 'elevation';
+let filter       = {q:'', range:'all'};
+let panelCollapsed = false;
+let sheet        = 'half';      // mobile bottom sheet: 'peek' | 'half' | 'full'
+let map, tileLayer, routeRenderer, profileChart, hoverMarker, detailMarkers, locateLayer;
+let currentTile  = 'outdoor';
+let tileFallback = false;       // a keyed tile provider failed this session → use free tiles
 let sbClient     = null;
 let idb          = null;
-let _haloLayers = [];
-window._segLayers = [];
+let segLayers    = [];
+const C = (typeof CONFIG !== 'undefined') ? CONFIG : {};
 let cfg          = {
-  url: (typeof CONFIG !== 'undefined') ? CONFIG.supabaseUrl : '',
-  key: (typeof CONFIG !== 'undefined') ? CONFIG.supabaseKey : '',
+  url: C.supabaseUrl || '',
+  key: C.supabaseKey || '',
+  mapTilerKey: C.mapTilerKey || '',
+  mapboxToken: C.mapboxToken || '',
   maxHR: 190,
   uid: 'local'
 };
 let currentUser  = null;
 let pendingSync  = new Set();
+
+/* ═══════════════════════════════════════════════════════════════
+   ICONS — stroke icons, injected into [data-icon] elements
+ ═══════════════════════════════════════════════════════════════ */
+const ICONS = {
+  plus:     '<path d="M12 5v14M5 12h14"/>',
+  minus:    '<path d="M5 12h14"/>',
+  search:   '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>',
+  layers:   '<path d="m12 3 9 4.5-9 4.5-9-4.5z"/><path d="m3 12 9 4.5 9-4.5"/><path d="m3 16.5 9 4.5 9-4.5"/>',
+  locate:   '<circle cx="12" cy="12" r="3"/><circle cx="12" cy="12" r="7.5"/><path d="M12 2v2.5M12 19.5V22M2 12h2.5M19.5 12H22"/>',
+  expand:   '<path d="M8 3H5a2 2 0 0 0-2 2v3M21 8V5a2 2 0 0 0-2-2h-3M3 16v3a2 2 0 0 0 2 2h3M16 21h3a2 2 0 0 0 2-2v-3"/>',
+  shrink:   '<path d="M8 3v3a2 2 0 0 1-2 2H3M21 8h-3a2 2 0 0 1-2-2V3M3 16h3a2 2 0 0 1 2 2v3M16 21v-3a2 2 0 0 1 2-2h3"/>',
+  back:     '<path d="m15 18-6-6 6-6"/>',
+  eye:      '<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>',
+  eyeOff:   '<path d="m3 3 18 18"/><path d="M10.6 5.1A10 10 0 0 1 12 5c6.5 0 10 7 10 7a17 17 0 0 1-3.2 4.2M6.6 6.6A17 17 0 0 0 2 12s3.5 7 10 7a10 10 0 0 0 5.4-1.6"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/>',
+  download: '<path d="M12 3v12M7 10l5 5 5-5"/><path d="M5 21h14"/>',
+  upload:   '<path d="M12 21V9M7 14l5-5 5 5"/><path d="M5 3h14"/>',
+  trash:    '<path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v6M14 11v6"/>',
+  user:     '<circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/>',
+  users:    '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.9M16 3.1a4 4 0 0 1 0 7.8"/>',
+  focus:    '<path d="M3 8V5a2 2 0 0 1 2-2h3M16 3h3a2 2 0 0 1 2 2v3M21 16v3a2 2 0 0 1-2 2h-3M8 21H5a2 2 0 0 1-2-2v-3"/><circle cx="12" cy="12" r="3"/>',
+  columns:  '<rect x="3" y="4" width="7" height="16" rx="1.5"/><rect x="14" y="4" width="7" height="16" rx="1.5"/>',
+  calendar: '<rect x="3" y="4.5" width="18" height="17" rx="2"/><path d="M16 2.5v4M8 2.5v4M3 10h18"/>',
+  x:        '<path d="M18 6 6 18M6 6l12 12"/>',
+  panel:    '<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18"/>',
+  cloud:    '<path d="M16 16l-4-4-4 4M12 12v9"/><path d="M20.4 18.6A5 5 0 0 0 18 9h-1.3A8 8 0 1 0 3 16.3"/>',
+  route:    '<circle cx="6" cy="19" r="2.5"/><path d="M8.5 19h8a3.5 3.5 0 0 0 0-7h-9a3.5 3.5 0 0 1 0-7H15.5"/><circle cx="18" cy="5" r="2.5"/>',
+  check:    '<path d="M20 6 9 17l-5-5"/>',
+  file:     '<path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6"/>',
+};
+function icon(name, cls) {
+  return `<svg class="ic${cls ? ' '+cls : ''}" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name] || ''}</svg>`;
+}
+function hydrateIcons(root) {
+  (root || document).querySelectorAll('[data-icon]').forEach(el => {
+    if (!el.querySelector(':scope > svg.ic')) el.insertAdjacentHTML('afterbegin', icon(el.dataset.icon));
+  });
+}
 
 /* ═══════════════════════════════════════════════════════════════
    INDEXEDDB
@@ -77,69 +126,178 @@ const idbAll    = ()   => idbOp('readonly',  s => s.getAll());
 const idbClear  = ()   => idbOp('readwrite', s => s.clear());
 
 /* ═══════════════════════════════════════════════════════════════
-   MAP
+   MAP — basemaps
+   Free, key-less tiles are the default. If a MapTiler key or Mapbox
+   token is configured (config.js or Settings) those are used instead,
+   and we fall back to the free tiles if the provider rejects the key.
+   Don't add CARTO (basemaps.cartocdn.com): it now serves an
+   "API KEY REQUIRED" image with HTTP 200 for every tile, so no
+   tileerror fires and the map just shows the placeholder.
 ═══════════════════════════════════════════════════════════════ */
-const TILES = {
-  dark:   ['https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png','© OpenStreetMap © CARTO'],
-  street: ['https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png','© OpenStreetMap'],
-  sat:    ['https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}','© Esri'],
-  topo:   ['https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png','© OpenTopoMap'],
+const BASEMAPS = {
+  outdoor: {
+    label: 'Standard',
+    free: {url:'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+           attr:'&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors', maxNativeZoom:19},
+    maptiler: 'outdoor-v2', mapbox: 'outdoors-v12',
+  },
+  topo: {
+    label: 'Topo',
+    free: {url:'https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png',
+           attr:'&copy; OpenStreetMap contributors, SRTM | &copy; <a href="https://opentopomap.org">OpenTopoMap</a> (CC-BY-SA)', maxNativeZoom:17},
+    maptiler: 'topo-v2', mapbox: 'outdoors-v12',
+  },
+  satellite: {
+    label: 'Satellite',
+    free: {url:'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+           attr:'Imagery &copy; Esri, Maxar, Earthstar Geographics', maxNativeZoom:19},
+    maptiler: 'satellite', maptilerExt: 'jpg', mapbox: 'satellite-streets-v12',
+  },
+  dark: {
+    label: 'Dark',
+    // OSM tiles darkened with a CSS filter (.tiles-dark) — keeps full trail detail, no key
+    free: {url:'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+           attr:'&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors', maxNativeZoom:19, className:'tiles-dark'},
+    maptiler: 'dataviz-dark', mapbox: 'dark-v11',
+  },
 };
-function initMap() {
-  map = L.map('map', {zoomControl:true}).setView([27.7, 85.3], 12);
-  setTileLayer('dark');
-  hoverMarker = L.marker([0,0], {
-    icon: L.divIcon({className:'',html:'',iconSize:[0,0]}),
-    interactive:false, zIndexOffset:1000
-  });
-}
-function setTileLayer(name) {
-  if (tileLayer) map.removeLayer(tileLayer);
-  const [url, attr] = TILES[name];
-  tileLayer = L.tileLayer(url, {attribution:attr, maxZoom:19}).addTo(map);
+const BASEMAP_ORDER = ['outdoor','topo','satellite','dark'];
 
-  const isLight = name === 'topo' || name === 'street';
-
-  // Remove previous halo layers
-  if (_haloLayers.length) {
-    _haloLayers.forEach(l => { try { map.removeLayer(l); } catch(_){} });
+function tileSource(name) {
+  const b = BASEMAPS[name];
+  if (!tileFallback && cfg.mapTilerKey) {
+    return {
+      provider: 'MapTiler',
+      url: `https://api.maptiler.com/maps/${b.maptiler}/256/{z}/{x}/{y}.${b.maptilerExt || 'png'}?key=${encodeURIComponent(cfg.mapTilerKey)}`,
+      opts: {attribution:'&copy; <a href="https://www.maptiler.com/copyright/">MapTiler</a> &copy; OpenStreetMap contributors', maxNativeZoom:20},
+    };
   }
-  _haloLayers = [];
-
-  rides.forEach(r => {
-    // Use r.group (the LayerGroup) — hasLayer(r.poly) is always false because
-    // poly lives inside the group, not directly on the map.
-    if (!map.hasLayer(r.group)) return;
-    // Thicker + full opacity on light tiles so routes stay readable
-    r.poly.setStyle({
-      color: r.color,
-      weight: isLight ? 5 : 3.5,
-      opacity: 1,
-      smoothFactor: 1
-    });
-    if (isLight) {
-      // White halo beneath the coloured track for contrast on pale backgrounds
-       const halo = L.polyline(r.poly.getLatLngs(), {
-         color: '#ffffff', weight: 11, opacity: 0.65, interactive: false
-       }).addTo(map);
-       _haloLayers.push(halo);
-       r.poly.bringToFront();
-    }
-  });
+  if (!tileFallback && cfg.mapboxToken) {
+    return {
+      provider: 'Mapbox',
+      url: `https://api.mapbox.com/styles/v1/mapbox/${b.mapbox}/tiles/512/{z}/{x}/{y}@2x?access_token=${encodeURIComponent(cfg.mapboxToken)}`,
+      opts: {attribution:'&copy; <a href="https://www.mapbox.com/about/maps/">Mapbox</a> &copy; OpenStreetMap contributors', tileSize:512, zoomOffset:-1},
+    };
+  }
+  return {provider:null, url:b.free.url, opts:{attribution:b.free.attr, maxNativeZoom:b.free.maxNativeZoom, subdomains:'abc', className:b.free.className || ''}};
 }
 
-function setTile(name, btn) {
-  setTileLayer(name);
+function previewUrl(name) {
+  const f = BASEMAPS[name].free;
+  return f.url.replace('{s}','a').replace('{z}','11').replace('{x}','1506').replace('{y}','857');
+}
+
+function initMap() {
+  map = L.map('map', {zoomControl:false, maxZoom:20, worldCopyJump:true}).setView([27.7, 85.3], 12);
+  map.attributionControl.setPrefix('<a href="https://leafletjs.com">Leaflet</a>');
+  routeRenderer = L.canvas({padding:0.5, tolerance:8});
+  detailMarkers = L.layerGroup().addTo(map);
+  hoverMarker = L.marker([0,0], {
+    icon: L.divIcon({className:'hover-dot', iconSize:[16,16]}),
+    interactive:false, keyboard:false, zIndexOffset:1000
+  });
+  hoverMarker.bindTooltip('', {permanent:true, direction:'top', offset:[0,-12], className:'telemetry', opacity:1});
+
+  map.on('locationfound', onLocationFound);
+  map.on('locationerror', e => {
+    document.getElementById('btn-locate').classList.remove('busy');
+    toast('Location unavailable: ' + e.message, 'err');
+  });
+  map.on('click', () => toggleLayerMenu(false));
+  setTileLayer(currentTile);
+}
+
+function setTileLayer(name) {
+  if (!BASEMAPS[name]) name = 'outdoor';
   currentTile = name;
-  document.querySelectorAll('.mb').forEach(b => b.classList.remove('on'));
-  btn.classList.add('on');
+  if (tileLayer) map.removeLayer(tileLayer);
+  const src = tileSource(name);
+  tileLayer = L.tileLayer(src.url, {...src.opts, maxZoom:20}).addTo(map);
+
+  if (src.provider) {
+    checkTileKey(src);
+    // Network-level failures (provider down, blocked) also fall back
+    let loaded = 0, failed = 0;
+    tileLayer.on('tileload', () => { loaded++; });
+    tileLayer.on('tileerror', () => {
+      if (++failed >= 3 && loaded === 0) useFreeTiles(src.provider + ' tiles failed to load');
+    });
+  }
+  document.body.dataset.basemap = name;
+  renderLayerMenu();
+  saveState();
+}
+
+// Providers answer a bad key with HTTP 401/403 *plus a placeholder image*
+// ("Invalid key"), which <img> happily displays — no tileerror fires. So probe
+// one tile with fetch() (both send CORS headers on errors) and check the status.
+const _keyChecks = {};
+function checkTileKey(src) {
+  const url = src.url.replace('{z}', '0').replace('{x}', '0').replace('{y}', '0');
+  _keyChecks[url] = _keyChecks[url] || fetch(url, {cache:'no-store'}).then(r => r.ok, () => true);  // offline ≠ bad key
+  _keyChecks[url].then(ok => { if (!ok) useFreeTiles(src.provider + ' rejected the map key'); });
+}
+function useFreeTiles(reason) {
+  if (tileFallback) return;
+  tileFallback = true;
+  toast(reason + ' — using free OpenStreetMap tiles', 'err');
+  setTileLayer(currentTile);
+}
+
+function setTile(name) {
+  setTileLayer(name);
+  toggleLayerMenu(false);
+}
+function cycleBasemap() {
+  setTileLayer(BASEMAP_ORDER[(BASEMAP_ORDER.indexOf(currentTile) + 1) % BASEMAP_ORDER.length]);
+  toast('Basemap: ' + BASEMAPS[currentTile].label);
+}
+
+function renderLayerMenu() {
+  const box = document.getElementById('layer-opts');
+  if (!box) return;
+  box.innerHTML = BASEMAP_ORDER.map(k => `
+    <button class="layer-opt${k === currentTile ? ' on' : ''}" role="menuitemradio" aria-checked="${k === currentTile}" onclick="setTile('${k}')">
+      <img src="${previewUrl(k)}" alt="" loading="lazy" class="${BASEMAPS[k].free.className || ''}"/>
+      <span>${BASEMAPS[k].label}</span>
+    </button>`).join('');
+  const src = tileSource(currentTile);
+  document.getElementById('layer-note').textContent =
+    src.provider ? `Tiles by ${src.provider}` : tileFallback ? 'Map key rejected · using free tiles' : 'Free tiles · no API key needed';
+}
+function toggleLayerMenu(force) {
+  const m = document.getElementById('layer-menu');
+  const open = force !== undefined ? force : m.hidden;
+  m.hidden = !open;
+  document.getElementById('btn-layers').classList.toggle('on', open);
+}
+
+/* ─── Locate me & fullscreen ─────────────────────────────────── */
+function locateMe() {
+  if (!navigator.geolocation) { toast('Geolocation is not supported by this browser', 'err'); return; }
+  document.getElementById('btn-locate').classList.add('busy');
+  map.locate({setView:false, enableHighAccuracy:true, timeout:10000});
+}
+function onLocationFound(e) {
+  document.getElementById('btn-locate').classList.remove('busy');
+  if (locateLayer) map.removeLayer(locateLayer);
+  locateLayer = L.layerGroup([
+    L.circle(e.latlng, {radius:e.accuracy, color:'#06B6D4', weight:1, opacity:.6, fillOpacity:.12, interactive:false}),
+    L.marker(e.latlng, {icon:L.divIcon({className:'me-dot', iconSize:[18,18]}), interactive:false, keyboard:false}),
+  ]).addTo(map);
+  map.flyTo(e.latlng, Math.max(map.getZoom(), 15), {duration:.8});
+}
+function toggleFullscreen() {
+  if (document.fullscreenElement) document.exitFullscreen?.();
+  else document.documentElement.requestFullscreen?.().catch(err => toast('Fullscreen unavailable: ' + err.message, 'err'));
 }
 
 /* ═══════════════════════════════════════════════════════════════
    FIT BINARY PARSER
    Tested against real Garmin ACTIVITY.fit files.
    Supports: lat/lng (semicircles), enhanced_altitude (field 78),
-   heart_rate, distance, timestamp. Speed derived from dist/time.
+   heart_rate, cadence, power, distance, speed, timestamp (Record,
+   global msg 20) and Lap summaries (global msg 19).
 ═══════════════════════════════════════════════════════════════ */
 function parseFIT(buffer) {
   const bytes = new Uint8Array(buffer);
@@ -155,6 +313,9 @@ function parseFIT(buffer) {
 
   const defs = {};  // localMsgNum → definition
   const pts  = [];
+  const laps = [];
+  const U8 = 0xFF, U16 = 0xFFFF, U32 = 0xFFFFFFFF;
+  const ok = (v, inv) => v != null && v !== inv;
 
   let off = headerLen;
 
@@ -192,7 +353,7 @@ function parseFIT(buffer) {
       const d = defs[localNum];
       if (!d) { off++; continue; }
 
-      if (d.gmn === 20) {   // Record message
+      if (d.gmn === 20 || d.gmn === 19) {
         let fo = off;
         const p = {};
         for (const {fd, fs, bt} of d.fields) {
@@ -201,23 +362,40 @@ function parseFIT(buffer) {
           fo += fs;
         }
 
-        const lat = p[0], lng = p[1];
-        const INV = 0x7FFFFFFF;
-        if (lat != null && lng != null && lat !== INV && lng !== INV) {
-          // Enhanced altitude (field 78): raw/5 - 500 (verified on test file)
-          let ele = 0;
-          if (p[78] != null && p[78] < 0xFFFF) ele = p[78] / 5 - 500;
-          else if (p[2]  != null && p[2]  < 0xFFFF) ele = p[2]  / 5 - 100;
+        if (d.gmn === 20) {   // Record message
+          const lat = p[0], lng = p[1];
+          const INV = 0x7FFFFFFF;
+          if (lat != null && lng != null && lat !== INV && lng !== INV) {
+            // Enhanced altitude (field 78): raw/5 - 500 (verified on test file)
+            let ele = 0;
+            if (p[78] != null && p[78] < 0xFFFF) ele = p[78] / 5 - 500;
+            else if (p[2]  != null && p[2]  < 0xFFFF) ele = p[2]  / 5 - 100;
 
-          pts.push({
-            lat:   lat * SEMICIRCLE,
-            lng:   lng * SEMICIRCLE,
-            ele:   Math.round(ele * 10) / 10,
-            hr:    (p[3]  != null && p[3]  < 250) ? p[3]  : null,
-            cad:   (p[4]  != null && p[4]  < 255) ? p[4]  : null,
-            power: (p[7]  != null && p[7]  < 9999) ? p[7] : null,
-            dist:  (p[5]  != null) ? p[5] / 100 : null, // cm → m
-            ts:    (p[253]!= null) ? new Date((p[253] + FIT_EPOCH) * 1000) : null,
+            // enhanced_speed (73) / speed (6) are m/s × 1000
+            const spd = ok(p[73], U32) ? p[73] : ok(p[6], U16) ? p[6] : null;
+
+            pts.push({
+              lat:   lat * SEMICIRCLE,
+              lng:   lng * SEMICIRCLE,
+              ele:   Math.round(ele * 10) / 10,
+              hr:    (p[3]  != null && p[3]  < 250) ? p[3]  : null,
+              cad:   (p[4]  != null && p[4]  < 255) ? p[4]  : null,
+              power: (p[7]  != null && p[7]  < 9999) ? p[7] : null,
+              dist:  ok(p[5], U32) ? p[5] / 100 : null, // cm → m
+              speed: spd != null ? Math.round(spd / 1000 * 3.6 * 10) / 10 : null,
+              ts:    (p[253]!= null) ? new Date((p[253] + FIT_EPOCH) * 1000) : null,
+            });
+          }
+        } else {              // Lap message
+          const timer = ok(p[8], U32) ? p[8] / 1000 : ok(p[7], U32) ? p[7] / 1000 : null;
+          const spd   = ok(p[110], U32) ? p[110] : ok(p[13], U16) ? p[13] : null;
+          laps.push({
+            totalTime: timer,
+            distance:  ok(p[9], U32) ? p[9] / 100000 : null,           // cm → km
+            avgHr:     ok(p[15], U8) ? p[15] : null,
+            maxHr:     ok(p[16], U8) ? p[16] : null,
+            avgSpeed:  spd != null ? Math.round(spd / 1000 * 3.6 * 10) / 10 : null,
+            ascent:    ok(p[21], U16) ? p[21] : null,
           });
         }
       }
@@ -227,10 +405,10 @@ function parseFIT(buffer) {
 
   if (!pts.length) throw new Error('No GPS points found. Make sure GPS was active during the activity.');
 
-  // Compute speed from distance/time deltas
+  // Fill in speed from distance/time deltas where the device didn't record it
   for (let i = 1; i < pts.length; i++) {
     const a = pts[i-1], b = pts[i];
-    if (a.dist != null && b.dist != null && a.ts && b.ts) {
+    if (b.speed == null && a.dist != null && b.dist != null && a.ts && b.ts) {
       const dd = b.dist - a.dist;       // metres
       const dt = (b.ts - a.ts) / 1000;  // seconds
       if (dt > 0 && dd >= 0 && dd < 200) {
@@ -239,7 +417,8 @@ function parseFIT(buffer) {
     }
   }
 
-  return pts;
+  // Single-lap files just repeat the whole ride — not worth showing
+  return {pts, laps: laps.length > 1 ? laps : []};
 }
 
 function readVal(dv, bytes, off, size, bt, le) {
@@ -256,82 +435,96 @@ function readVal(dv, bytes, off, size, bt, le) {
 
 /* ═══════════════════════════════════════════════════════════════
    GPX PARSER
-   Handles plain GPX routes/tracks AND gpx.studio export format.
-   Supports Garmin TrackPointExtension namespace for HR/cadence.
+   Handles plain GPX tracks/routes/waypoints and gpx.studio exports.
+   Extensions (Garmin TrackPointExtension etc.) are matched by local
+   name in a single pass over each point's descendants, which is far
+   faster on large files than per-field namespace/XPath lookups.
 ═══════════════════════════════════════════════════════════════ */
+const GPX_EXT = {hr:'hr', heartrate:'hr', cad:'cad', cadence:'cad', speed:'speed', power:'power', watts:'power'};
+
 function parseGPX(text) {
   const xml = new DOMParser().parseFromString(text, 'application/xml');
-  if (xml.querySelector('parsererror')) throw new Error('Invalid XML in GPX file');
+  if (xml.getElementsByTagName('parsererror').length) throw new Error('Invalid XML in GPX file');
 
   // Try track points first, then route points, then waypoints
-  let trkpts = Array.from(xml.querySelectorAll('trkpt'));
-  if (!trkpts.length) trkpts = Array.from(xml.querySelectorAll('rtept'));
-  if (!trkpts.length) trkpts = Array.from(xml.querySelectorAll('wpt'));
-  if (!trkpts.length) throw new Error('No track/route/waypoints found in GPX');
+  let nodes = xml.getElementsByTagNameNS('*', 'trkpt');
+  if (!nodes.length) nodes = xml.getElementsByTagNameNS('*', 'rtept');
+  if (!nodes.length) nodes = xml.getElementsByTagNameNS('*', 'wpt');
+  if (!nodes.length) throw new Error('No track/route/waypoints found in GPX');
 
-  return trkpts.map(pt => {
+  const pts = [];
+  for (const pt of nodes) {
     const lat = parseFloat(pt.getAttribute('lat'));
-    const lon = parseFloat(pt.getAttribute('lon'));
-    if (isNaN(lat) || isNaN(lon)) return null;
-
-    const ele  = parseFloat(pt.querySelector('ele')?.textContent) || 0;
-    const time = pt.querySelector('time')?.textContent;
-
-    // Extension data — support multiple namespace prefixes used by Garmin, gpx.studio, etc.
-    const getExt = (...tags) => {
-      for (const tag of tags) {
-        // Try with common namespace prefixes
-        for (const ns of ['gpxtpx','ns3','ns2','gpxdata','']) {
-          const sel = ns ? `${ns}\\:${tag}` : tag;
-          try {
-            const el = pt.querySelector(sel);
-            if (el) { const v = parseFloat(el.textContent); if (!isNaN(v)) return v; }
-          } catch {}
-        }
-        // Also try local-name match via evaluate if available
-        try {
-          const iter = xml.evaluate(`.//*[local-name()='${tag}']`, pt, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
-          const node = iter.singleNodeValue;
-          if (node) { const v = parseFloat(node.textContent); if (!isNaN(v)) return v; }
-        } catch {}
+    const lng = parseFloat(pt.getAttribute('lon'));
+    if (!isFinite(lat) || !isFinite(lng)) continue;
+    const p = {lat, lng, ele:0, hr:null, cad:null, speed:null, power:null, ts:null};
+    for (const el of pt.getElementsByTagName('*')) {
+      const name = el.localName.toLowerCase();
+      if (name === 'ele') p.ele = parseFloat(el.textContent) || 0;
+      else if (name === 'time') { const d = new Date(el.textContent.trim()); if (!isNaN(d)) p.ts = d; }
+      else if (GPX_EXT[name] && !el.childElementCount) {
+        const v = parseFloat(el.textContent);
+        if (!isNaN(v) && p[GPX_EXT[name]] == null) p[GPX_EXT[name]] = v;
       }
-      return null;
-    };
+    }
+    if (p.speed != null) p.speed = Math.round(p.speed * 3.6 * 10) / 10;   // m/s → km/h
+    pts.push(p);
+  }
+  if (!pts.length) throw new Error('No valid coordinates found in GPX');
+  deriveSpeed(pts);
+  const trk = xml.querySelector('trk > name, rte > name, metadata > name');
+  pts.trackName = trk?.textContent.trim() || '';   // used as the ride name on import
+  return pts;
+}
 
-    return {
-      lat, lng: lon, ele,
-      hr:      getExt('hr','heartrate','HeartRateBpm'),
-      cad:     getExt('cad','cadence','RunCadence'),
-      speed:   getExt('speed'),
-      power:   getExt('power','Power'),
-      ts:      time ? new Date(time) : null,
-    };
-  }).filter(p => p && !isNaN(p.lat) && !isNaN(p.lng));
+// Speed from position/time over a ±2 point window, for files that don't record it
+function deriveSpeed(pts) {
+  if (pts.some(p => p.speed != null)) return;
+  for (let i = 0; i < pts.length; i++) {
+    const a = pts[Math.max(0, i-2)], b = pts[Math.min(pts.length-1, i+2)];
+    if (!a.ts || !b.ts) continue;
+    const dt = (b.ts - a.ts) / 1000;
+    if (dt <= 0 || dt > 120) continue;
+    let d = 0;
+    for (let j = Math.max(0, i-2); j < Math.min(pts.length-1, i+2); j++) d += haversine(pts[j], pts[j+1]);
+    const v = d / (dt / 3600);
+    if (v < 120) pts[i].speed = Math.round(v * 10) / 10;
+  }
 }
 
 /* ═══════════════════════════════════════════════════════════════
    FILE HANDLING
 ═══════════════════════════════════════════════════════════════ */
+function openFilePicker() { document.getElementById('fi').click(); }
+
 function handleFiles(fl) {
-  const files = Array.from(fl);
+  const files = Array.from(fl || []);
   document.getElementById('fi').value = '';
   if (!files.length) return;
-  processQueue(files, 0);
+  processQueue(files, 0, []);
 }
-function processQueue(files, i) {
-  if (i >= files.length) return;
+function processQueue(files, i, added) {
+  if (i >= files.length) {
+    if (added.length === 1) openDetail(added[0].id);
+    else if (added.length > 1) focusRides(added);
+    return;
+  }
   const f = files[i];
   const ext = f.name.split('.').pop().toLowerCase();
   loader(true, `Parsing ${f.name}…`);
 
-  const next = () => { loader(false); setTimeout(() => processQueue(files, i+1), 50); };
+  const next = r => { if (r) added.push(r); loader(false); setTimeout(() => processQueue(files, i+1, added), 30); };
 
   if (ext === 'gpx') {
     const r = new FileReader();
     r.onload = e => {
-      try { addRide(f.name.replace(/\.gpx$/i,''), parseGPX(e.target.result), 'gpx'); }
+      let ride = null;
+      try {
+        const pts = parseGPX(e.target.result);
+        ride = addRide(pts.trackName || f.name.replace(/\.gpx$/i,''), pts, 'gpx');
+      }
       catch(err) { toast('GPX error in "'+f.name+'": '+err.message, 'err'); console.error(err); }
-      next();
+      next(ride);
     };
     r.onerror = () => { toast('Cannot read '+f.name, 'err'); next(); };
     r.readAsText(f);
@@ -339,14 +532,13 @@ function processQueue(files, i) {
   } else if (ext === 'fit') {
     const r = new FileReader();
     r.onload = e => {
+      let ride = null;
       try {
-        const raw = parseFIT(e.target.result);
-        const pts  = Array.isArray(raw) ? raw : raw.pts;
-        const laps = Array.isArray(raw) ? [] : (raw.laps || []);
-        addRide(f.name.replace(/\.fit$/i,''), pts, 'fit', laps);
+        const {pts, laps} = parseFIT(e.target.result);
+        ride = addRide(f.name.replace(/\.fit$/i,''), pts, 'fit', laps);
       }
       catch(err) { toast('FIT error in "'+f.name+'": '+err.message, 'err'); console.error(err); }
-      next();
+      next(ride);
     };
     r.onerror = () => { toast('Cannot read '+f.name, 'err'); next(); };
     r.readAsArrayBuffer(f);
@@ -356,171 +548,115 @@ function processQueue(files, i) {
     next();
   }
 }
-function onDragOver(e)  { e.preventDefault(); document.getElementById('dz').classList.add('ov'); }
-function onDragLeave()  { document.getElementById('dz').classList.remove('ov'); }
-function onDrop(e)      { e.preventDefault(); document.getElementById('dz').classList.remove('ov'); handleFiles(e.dataTransfer.files); }
 
 /* ═══════════════════════════════════════════════════════════════
-   RIDE MANAGEMENT
+   GEOMETRY
 ═══════════════════════════════════════════════════════════════ */
-function buildClimbPolylines(points) {
-  // Disabled: see ENABLE_DIFFICULTY_SEGMENTS feature flag.
-  // Steep-segment overlays break on tile switches and clutter multi-route views.
-  if (!ENABLE_DIFFICULTY_SEGMENTS) return [];
+function haversine(a,b) {
+  const R=6371, dLat=(b.lat-a.lat)*Math.PI/180, dLon=(b.lng-a.lng)*Math.PI/180;
+  const x=Math.sin(dLat/2)**2+Math.cos(a.lat*Math.PI/180)*Math.cos(b.lat*Math.PI/180)*Math.sin(dLon/2)**2;
+  return R*2*Math.atan2(Math.sqrt(x),Math.sqrt(Math.max(0,1-x)));
+}
 
-  const steepPolys = [];
-  let currentClimb = [];
-  for (let i=1; i<points.length; i++) {
-    const d = haversine(points[i-1], points[i]);
-    const deltaEle = points[i].ele - points[i-1].ele;
-    const grade = d > 0.001 ? (deltaEle / (d * 1000)) * 100 : 0;
-    if (grade > 8) {
-      if (currentClimb.length === 0) currentClimb.push(points[i-1]);
-      currentClimb.push(points[i]);
-    } else {
-      if (currentClimb.length > 0) {
-        steepPolys.push(L.polyline(currentClimb.map(p=>[p.lat,p.lng]), {color: '#ff4500', weight: 4, opacity: 0.9}));
-        currentClimb = [];
+// Cumulative distance in km at each point
+function cumulativeKm(pts) {
+  const c = new Float64Array(pts.length);
+  for (let i = 1; i < pts.length; i++) c[i] = c[i-1] + haversine(pts[i-1], pts[i]);
+  return c;
+}
+
+// Ramer-Douglas-Peucker, iterative (no recursion limit on 100k-point logs).
+// Works in a local equirectangular projection so epsilon is in metres.
+// Returns the indices of the points to keep.
+function simplifyRDP(pts, epsM) {
+  const n = pts.length;
+  if (n < 3) return pts.map((_, i) => i);
+  const kx = 111320 * Math.cos(pts[0].lat * Math.PI / 180), ky = 110540;
+  const xs = new Float64Array(n), ys = new Float64Array(n);
+  for (let i = 0; i < n; i++) { xs[i] = pts[i].lng * kx; ys[i] = pts[i].lat * ky; }
+  const keep = new Uint8Array(n);
+  keep[0] = keep[n-1] = 1;
+  const eps2 = epsM * epsM;
+  const stack = [0, n-1];
+  while (stack.length) {
+    const b = stack.pop(), a = stack.pop();
+    const ax = xs[a], ay = ys[a], dx = xs[b] - ax, dy = ys[b] - ay;
+    const len2 = dx*dx + dy*dy;
+    let maxD = -1, idx = -1;
+    for (let i = a + 1; i < b; i++) {
+      let px = xs[i] - ax, py = ys[i] - ay;
+      if (len2 > 0) {
+        const t = Math.max(0, Math.min(1, (px*dx + py*dy) / len2));
+        px -= t*dx; py -= t*dy;
       }
+      const d = px*px + py*py;
+      if (d > maxD) { maxD = d; idx = i; }
+    }
+    if (maxD > eps2) {
+      keep[idx] = 1;
+      stack.push(a, idx, idx, b);
     }
   }
-  if (currentClimb.length > 0) {
-    steepPolys.push(L.polyline(currentClimb.map(p=>[p.lat,p.lng]), {color: '#ff4500', weight: 4, opacity: 0.9}));
+  const out = [];
+  for (let i = 0; i < n; i++) if (keep[i]) out.push(i);
+  return out;
+}
+
+// Evenly spaced indices (always includes the last point)
+function sampleIndices(n, target) {
+  if (n <= target) return Array.from({length:n}, (_, i) => i);
+  const out = [];
+  const step = (n - 1) / (target - 1);
+  for (let i = 0; i < target; i++) out.push(Math.round(i * step));
+  return out;
+}
+
+// Gradient (%) around point i, over ±halfM metres
+function gradeAt(r, i, halfM = 50) {
+  const c = r.cum, p = r.points, n = p.length;
+  let a = i, b = i;
+  while (a > 0 && (c[i] - c[a]) * 1000 < halfM) a--;
+  while (b < n - 1 && (c[b] - c[i]) * 1000 < halfM) b++;
+  const dm = (c[b] - c[a]) * 1000;
+  return dm > 10 ? (p[b].ele - p[a].ele) / dm * 100 : 0;
+}
+
+// Steepest sustained climb over GRADE_WINDOW_M — raw point-to-point grades are dominated by GPS noise
+function maxGradient(pts, cum) {
+  let best = 0, j = 0;
+  for (let i = 0; i < pts.length; i++) {
+    if (j < i) j = i;
+    while (j < pts.length - 1 && (cum[j] - cum[i]) * 1000 < GRADE_WINDOW_M) j++;
+    const dm = (cum[j] - cum[i]) * 1000;
+    if (dm < GRADE_WINDOW_M * 0.8) break;
+    const g = (pts[j].ele - pts[i].ele) / dm * 100;
+    if (g > best) best = g;
   }
-  return steepPolys;
-}
-
-function addRide(name, points, fileType, laps) {
-  if (!fileType) fileType = 'gpx';
-  if (!laps) laps = [];
-  if (rides.find(r => r.name === name)) { toast('"'+name+'" already loaded', 'warn'); return; }
-
-  const id    = 'r_'+Date.now()+'_'+Math.random().toString(36).slice(2,6);
-  const color = COLORS[rides.length % COLORS.length];
-  const stats = computeStats(points);
-  const smap  = buildSampleMap(points);
-
-  const poly = L.polyline(points.map(p=>[p.lat,p.lng]), {color, weight:2.5, opacity:.88, smoothFactor:1});
-  
-  const steepPolys = buildClimbPolylines(points);
-  const group = L.layerGroup([poly, ...steepPolys]).addTo(map);
-
-  const ride = {id, name, color, points, smap, stats, fileType, laps, poly, steepPolys, group, visible:true};
-  rides.push(ride);
-  map.fitBounds(poly.getBounds(), {padding:[26,26]});
-
-  // Persist
-  idbPut({id, name, color, points, stats, fileType, laps, savedAt:Date.now()}).catch(()=>{});
-  pendingSync.add(id);
-  updateUnsavedChip();
-
-  refresh();
-  toast('Loaded: '+name+' ('+points.length.toLocaleString()+' pts)', 'ok');
-}
-
-function buildSampleMap(points) {
-  const n = points.length;
-  // Adaptive sampling: more points for shorter rides, fewer for long ones
-  const target = n < 200 ? n : n < 2000 ? Math.min(n, 400) : Math.min(n, 250);
-  const step = n / target;
-  const sampleMap = [];
-  for (let i = 0; i < target; i++) {
-    sampleMap.push(Math.min(Math.floor(i * step), n - 1));
-  }
-  return sampleMap;
-}
-
-async function removeRide(id, e) {
-  e?.stopPropagation();
-  const idx = rides.findIndex(r=>r.id===id);
-  if (idx<0) return;
-  map.removeLayer(rides[idx].group);
-  rides.splice(idx,1);
-  pendingSync.delete(id);
-  selectedIds.delete(id);
-  await idbDel(id).catch(()=>{});
-  updateUnsavedChip();
-  refresh();
-}
-
-function toggleVis(id, e) {
-  e?.stopPropagation();
-  const r = rides.find(r=>r.id===id);
-  if (!r) return;
-  r.visible = !r.visible;
-  r.visible ? r.group.addTo(map) : map.removeLayer(r.group);
-  refresh();
-}
-function zoomTo(id, e) {
-  e?.stopPropagation();
-  const r = rides.find(r=>r.id===id);
-  if (r) map.fitBounds(r.poly.getBounds(), {padding:[26,26]});
-}
-
-function toggleMultiSelect(enabled) {
-  multiSelectMode = enabled;
-  if (!enabled) {
-    // When turning off multi-select, keep only the last selected route (if any)
-    selectedIds.clear();
-    if (lastSelectedId) selectedIds.add(lastSelectedId);
-  }
-  saveState();
-  refresh();
-}
-
-function selectRide(id, e) {
-  if (!e) e = { ctrlKey: false, metaKey: false };
-  
-  if (multiSelectMode || e.ctrlKey || e.metaKey) {
-    if (selectedIds.has(id)) selectedIds.delete(id);
-    else selectedIds.add(id);
-  } else {
-    if (selectedIds.has(id) && selectedIds.size === 1) {
-      selectedIds.clear();
-    } else {
-      selectedIds.clear();
-      selectedIds.add(id);
-    }
-  }
-  
-  lastSelectedId = id;
-  refresh();
-}
-
-function showAllRides() {
-
-  selectedIds.clear();
-  // Show all polylines
-  rides.forEach(r => { r.visible = true; if (!map.hasLayer(r.group)) r.group.addTo(map); });
-  refresh();
-}
-
-async function clearAll() {
-  rides.forEach(r => map.removeLayer(r.group));
-  rides = []; selectedIds.clear(); pendingSync.clear();
-  if (profileChart) { profileChart.destroy(); profileChart = null; }
-  await idbClear().catch(()=>{});
-  updateUnsavedChip();
-  refresh();
+  return Math.round(Math.min(best, 60) * 10) / 10;
 }
 
 /* ═══════════════════════════════════════════════════════════════
    STATS ENGINE
 ═══════════════════════════════════════════════════════════════ */
 function computeStats(pts) {
-  if (!pts.length) return {};
+  if (!pts.length) return {v: STATS_VER};
 
-  let dist = 0;
-  let climbDist = 0;
+  const cum = cumulativeKm(pts);
+  const dist = cum[cum.length - 1];
+  let climbDist = 0, moving = 0;
   for (let i=1; i<pts.length; i++) {
-    const d = haversine(pts[i-1], pts[i]);
-    dist += d;
-    
+    const d = cum[i] - cum[i-1];
     // CLIMB DETECTION (> 8% grade)
     const deltaEle = pts[i].ele - pts[i-1].ele;
     if (d > 0.001) {
       const grade = (deltaEle / (d * 1000)) * 100;
       if (grade > 8) climbDist += d;
+    }
+    // MOVING TIME: gaps under 2 min where we moved faster than ~2 km/h
+    const a = pts[i-1].ts, b = pts[i].ts;
+    if (a instanceof Date && b instanceof Date) {
+      const dt = (b - a) / 1000;
+      if (dt > 0 && dt <= 120 && (d * 1000) / dt > 0.55) moving += dt;
     }
   }
 
@@ -547,7 +683,7 @@ function computeStats(pts) {
   const maxHR = cfg.maxHR || 190;
   const zoneCounts = HR_ZONES.map((z,i) => {
     const lo = i===0 ? 0 : HR_ZONES[i-1].maxPct;
-    return hrs.filter(h => { const p=h/maxHR; return p>=lo && p<z.maxPct; }).length;
+    return hrs.filter(h => { const p=h/maxHR; return p>=lo && (p<z.maxPct || i===HR_ZONES.length-1); }).length;
   });
   const zTotal = zoneCounts.reduce((a,b)=>a+b,0);
   const zonePct = zoneCounts.map(c => zTotal>0 ? Math.round(c/zTotal*100) : 0);
@@ -556,16 +692,20 @@ function computeStats(pts) {
   const tss = (dur && avgHrV && maxHR) ?
     Math.round((dur/3600) * Math.pow(avgHrV/maxHR,2) * 100) : null;
 
-  const avgSpd = spds.length ? avg(spds) : (dist&&dur ? dist/(dur/3600) : null);
+  const avgSpd = moving > 60 ? dist / (moving / 3600)
+               : spds.length ? avg(spds) : (dist && dur ? dist / (dur / 3600) : null);
 
   return {
+    v:        STATS_VER,
     distance: +dist.toFixed(2),
     climbDist: +climbDist.toFixed(2),
     duration: dur,
+    movingTime: moving > 60 ? Math.round(moving) : dur,
     eleGain:  Math.round(eleGain),
     eleLoss:  Math.round(eleLoss),
     maxEle:   Math.round(max(eles)||0),
     minEle:   Math.round(min(eles)||0),
+    maxGrade: maxGradient(pts, cum),
     avgHr:    hrs.length  ? Math.round(avgHrV) : null,
     maxHr:    hrs.length  ? Math.round(max(hrs)) : null,
     avgSpeed: avgSpd      ? +avgSpd.toFixed(1) : null,
@@ -583,225 +723,481 @@ function computeStats(pts) {
   };
 }
 
-function haversine(a,b) {
-  const R=6371, dLat=(b.lat-a.lat)*Math.PI/180, dLon=(b.lng-a.lng)*Math.PI/180;
-  const x=Math.sin(dLat/2)**2+Math.cos(a.lat*Math.PI/180)*Math.cos(b.lat*Math.PI/180)*Math.sin(dLon/2)**2;
-  return R*2*Math.atan2(Math.sqrt(x),Math.sqrt(Math.max(0,1-x)));
+/* ═══════════════════════════════════════════════════════════════
+   RIDE MANAGEMENT
+   Stored record: {id, name, color, points, stats, fileType, laps, savedAt}
+   Runtime ride adds: cum, simp, smap, thumb, poly, casing, group, visible
+═══════════════════════════════════════════════════════════════ */
+const rideById = id => rides.find(r => r.id === id);
+
+function toRecord(r) {
+  return {id:r.id, name:r.name, color:r.color, points:r.points, stats:r.stats, fileType:r.fileType, laps:r.laps, savedAt:r.savedAt};
+}
+
+function nextColor() {
+  const used = new Set(rides.map(r => r.color));
+  return COLORS.find(c => !used.has(c)) || COLORS[rides.length % COLORS.length];
+}
+
+// Build the runtime ride (derived data + map layers) from a stored record
+function hydrate(rec) {
+  if (rideById(rec.id)) return null;
+  const pts = rec.points || [];
+  pts.forEach(p => { if (p.ts && typeof p.ts === 'string') p.ts = new Date(p.ts); });
+  const fresh = !(rec.stats && rec.stats.v === STATS_VER);
+  const stats = fresh ? computeStats(pts) : rec.stats;
+  if (stats.startDate && !(stats.startDate instanceof Date)) stats.startDate = new Date(stats.startDate);
+
+  const r = {
+    id: rec.id, name: rec.name, color: rec.color || nextColor(),
+    points: pts, stats, fileType: rec.fileType || rec.file_type || 'gpx',
+    laps: rec.laps || [], savedAt: rec.savedAt || Date.parse(rec.created_at) || Date.now(),
+    visible: true,
+  };
+  r.cum   = cumulativeKm(pts);
+  r.simp  = simplifyRDP(pts, SIMPLIFY_M);
+  r.smap  = sampleIndices(pts.length, CHART_POINTS);
+  r.thumb = buildThumb(r);
+  buildRideLayers(r);
+  rides.push(r);
+  if (fresh && idb) idbPut(toRecord(r)).catch(()=>{});
+  return r;
+}
+
+function buildRideLayers(r) {
+  const latlngs = r.simp.map(i => [r.points[i].lat, r.points[i].lng]);
+  const line = {renderer:routeRenderer, lineCap:'round', lineJoin:'round'};
+  r.casing = L.polyline(latlngs, {...line, color:'#0F172A', weight:7, opacity:.55, interactive:false});
+  r.poly   = L.polyline(latlngs, {...line, color:r.color, weight:3.5, opacity:1});
+  r.poly.on('click', e => { L.DomEvent.stopPropagation(e); openDetail(r.id); });
+  r.poly.on('mousemove', e => onRouteHover(r, e.latlng));
+  r.poly.on('mouseout', clearChartHover);
+  r.group = L.layerGroup([r.casing, r.poly]);
+}
+
+// Mini SVG of the route shape for feed cards
+function buildThumb(r) {
+  let idx = r.simp;
+  if (idx.length > 160) idx = sampleIndices(idx.length, 160).map(k => idx[k]);
+  if (idx.length < 2) return '';
+  const k = Math.cos(r.points[idx[0]].lat * Math.PI / 180);
+  const xy = idx.map(i => [r.points[i].lng * k, -r.points[i].lat]);
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  xy.forEach(([x, y]) => { x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y); });
+  const s = 48 / (Math.max(x1 - x0, y1 - y0) || 1);
+  const ox = (56 - (x1 - x0) * s) / 2, oy = (56 - (y1 - y0) * s) / 2;
+  const pts = xy.map(([x, y]) => [((x - x0) * s + ox).toFixed(1), ((y - y0) * s + oy).toFixed(1)]);
+  return `<svg viewBox="0 0 56 56" aria-hidden="true"><path d="M${pts.map(p => p.join(' ')).join('L')}"/><circle cx="${pts[0][0]}" cy="${pts[0][1]}" r="2.6"/></svg>`;
+}
+
+function addRide(name, points, fileType, laps) {
+  if (!points || !points.length) { toast('"'+name+'" has no GPS points', 'err'); return null; }
+  if (rides.find(r => r.name === name)) { toast('"'+name+'" already loaded', 'warn'); return null; }
+
+  const rec = {
+    id: 'r_'+Date.now()+'_'+Math.random().toString(36).slice(2,6),
+    name, color: nextColor(), points, stats: computeStats(points),
+    fileType: fileType || 'gpx', laps: laps || [], savedAt: Date.now(),
+  };
+  idbPut(rec).catch(()=>{});
+  const r = hydrate(rec);
+  pendingSync.add(r.id);
+  updateUnsavedChip();
+  refresh();
+  toast('Loaded: '+name+' ('+points.length.toLocaleString()+' pts)', 'ok');
+  return r;
+}
+
+async function removeRide(id) {
+  const r = rideById(id);
+  if (!r) return;
+  map.removeLayer(r.group);
+  rides = rides.filter(x => x.id !== id);
+  pendingSync.delete(id);
+  compareIds.delete(id);
+  await idbDel(id).catch(()=>{});
+  updateUnsavedChip();
+  if (activeId === id) backToList();
+  else refresh();
+}
+
+async function deleteRide(id) {
+  const r = rideById(id);
+  if (!r || !confirm(`Delete "${r.name}" from this device?`)) return;
+  await removeRide(id);
+  toast('Ride deleted');
+}
+
+function toggleVis(id) {
+  const r = rideById(id);
+  if (!r) return;
+  r.visible = !r.visible;
+  saveState();
+  refresh();
+}
+
+async function clearAll() {
+  if (!rides.length && !(await idbAll() || []).length) { toast('No rides to delete'); return; }
+  if (!confirm(`Delete all ${rides.length} ride(s) stored on this device? This cannot be undone.`)) return;
+  rides.forEach(r => map.removeLayer(r.group));
+  rides = []; compareIds.clear(); pendingSync.clear();
+  await idbClear().catch(()=>{});
+  updateUnsavedChip();
+  closeSettings();
+  backToList();
+  toast('All local rides deleted');
 }
 
 /* ═══════════════════════════════════════════════════════════════
-   VISIBILITY — selected vs all
+   NAVIGATION — list / detail / compare
 ═══════════════════════════════════════════════════════════════ */
-function visibleRides() {
-  // If routes are selected, only show those
-  if (selectedIds.size > 0) {
-    return rides.filter(r => selectedIds.has(r.id));
-  }
-  return rides.filter(r => r.visible);
+function openDetail(id) {
+  const r = rideById(id);
+  if (!r) return;
+  if (compareMode && view === 'list') { toggleCompareId(id); return; }
+  view = 'detail';
+  activeId = id;
+  if (!r.visible) { r.visible = true; saveState(); }
+  if (!(METRICS[chartMetric].has ? r.stats[METRICS[chartMetric].has] : true)) chartMetric = 'elevation';
+  if (isMobile() && sheet === 'peek') setSheet('half');
+  refresh();
+  focusRides([r]);
 }
 
-function applyPolylineVisibility() {
+function backToList() {
+  view = 'list';
+  activeId = null;
+  clearSegLayers();
+  hideHoverMarker();
+  refresh();
+}
+
+function toggleCompareMode(force) {
+  compareMode = force !== undefined ? force : !compareMode;
+  if (!compareMode) compareIds.clear();
+  refresh();
+}
+function toggleCompareId(id) {
+  compareIds.has(id) ? compareIds.delete(id) : compareIds.add(id);
+  refresh();
+}
+function openCompare() {
+  const list = rides.filter(r => compareIds.has(r.id));
+  if (list.length < 2) { toast('Select at least 2 rides to compare', 'warn'); return; }
+  view = 'compare';
+  list.forEach(r => { r.visible = true; });
+  refresh();
+  focusRides(list);
+}
+function setCompareTab(tab) {
+  compareTab = tab;
+  if (tab !== 'segments') clearSegLayers();
+  renderCompare();
+}
+
+function setFilter(k, v) {
+  filter[k] = v;
+  renderFeed();
+}
+
+// Map padding so routes aren't hidden behind the panel / bottom sheet
+function mapPadding() {
+  if (isMobile()) return {paddingTopLeft:[24, 72], paddingBottomRight:[24, sheetVisible(sheet) + 24]};
+  const panel = document.getElementById('panel');
+  const left = panelCollapsed ? 24 : panel.getBoundingClientRect().right + 32;
+  return {paddingTopLeft:[left, 32], paddingBottomRight:[72, 32]};
+}
+
+function focusRides(list, animate = true) {
+  if (!list.length) return;
+  const b = L.latLngBounds([]);   // fresh object — poly.getBounds() is cached, don't mutate it
+  list.forEach(r => b.extend(r.poly.getBounds()));
+  if (!b.isValid()) return;
+  const opts = {...mapPadding(), maxZoom:16};
+  animate ? map.flyToBounds(b, {...opts, duration:.9}) : map.fitBounds(b, opts);
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   MAP STYLING — which routes are highlighted / dimmed
+═══════════════════════════════════════════════════════════════ */
+function focusSet() {
+  if (view === 'detail') return new Set([activeId]);
+  if (view === 'compare' || (compareMode && compareIds.size)) return compareIds;
+  return null;
+}
+
+function applyMapStyles() {
+  const focus = focusSet();
+  const front = [];
   rides.forEach(r => {
-    const show = selectedIds.size > 0 ? selectedIds.has(r.id) : r.visible;
-    if (show) {
-      if (!map.hasLayer(r.group)) r.group.addTo(map);
-      
-      // GHOSTING LOGIC
-      if (selectedIds.size > 1) {
-        const isPrimary = r.id === lastSelectedId;
-        r.poly.setStyle({
-          weight: isPrimary ? 4 : 2,
-          opacity: isPrimary ? 1 : 0.3,
-          dashArray: isPrimary ? null : '5, 10'
-        });
-        if (ENABLE_DIFFICULTY_SEGMENTS && r.steepPolys) {
-          r.steepPolys.forEach(sp => sp.setStyle({
-            opacity: isPrimary ? 0.9 : 0.2
-          }));
-        }
-      } else {
-        r.poly.setStyle({
-          weight: 2.5,
-          opacity: 0.88,
-          dashArray: null
-        });
-        if (ENABLE_DIFFICULTY_SEGMENTS && r.steepPolys) r.steepPolys.forEach(sp => sp.setStyle({opacity: 0.9}));
-      }
-    } else {
-      map.removeLayer(r.group);
-    }
+    const inFocus = focus ? focus.has(r.id) : true;
+    if (!r.visible && !(focus && inFocus)) { map.removeLayer(r.group); return; }
+    if (!map.hasLayer(r.group)) r.group.addTo(map);
+    const hero = view === 'detail' && r.id === activeId;
+    r.poly.setStyle({opacity: inFocus ? 1 : .5, weight: hero ? 5 : inFocus ? 3.5 : 2.5});
+    r.casing.setStyle({opacity: inFocus ? .55 : 0, weight: hero ? 10 : 7});
+    if (inFocus) front.push(r);
   });
+  front.forEach(r => { r.casing.bringToFront(); r.poly.bringToFront(); });
+  renderDetailMarkers();
+}
+
+function renderDetailMarkers() {
+  detailMarkers.clearLayers();
+  const r = view === 'detail' && rideById(activeId);
+  if (!r || r.points.length < 2) return;
+  const a = r.points[0], b = r.points[r.points.length - 1];
+  const mk = (p, cls, title) => L.marker([p.lat, p.lng], {
+    icon: L.divIcon({className:'pin ' + cls, iconSize:[14,14]}), interactive:false, keyboard:false, title,
+  });
+  detailMarkers.addLayer(mk(b, 'pin-end', 'Finish'));
+  detailMarkers.addLayer(mk(a, 'pin-start', 'Start'));
 }
 
 /* ═══════════════════════════════════════════════════════════════
-   RENDER SIDEBAR
+   RENDER — activity feed
 ═══════════════════════════════════════════════════════════════ */
-function renderSidebar() {
-  const list = document.getElementById('rides-list');
-  list.querySelectorAll('.rc').forEach(el=>el.remove());
-  document.getElementById('sb-empty').style.display = rides.length ? 'none' : '';
+const rideTime = r => (r.stats.startDate ? +r.stats.startDate : 0) || r.savedAt || 0;
 
-  rides.forEach(r => {
-    const isSel = selectedIds.has(r.id);
-    const isFad = selectedIds.size > 0 && !isSel;
-    const el = document.createElement('div');
-    el.className = 'rc' + (isSel?' sel':'') + (!r.visible&&selectedIds.size===0?' fad':'') + (isFad?' fad':'');
-    el.style.setProperty('--rc', r.color);
-    el.onclick = (e) => selectRide(r.id, e);
-    el.innerHTML = `
-      <div class="rc-hd">
-        <input type="checkbox" class="rc-cb" ${isSel?'checked':''}>
-        <div class="rc-dot"></div>
-        <div class="rc-nm" title="${esc(r.name)}">${esc(r.name)}</div>
-        <div class="rc-acts">
-          <button class="ibb rc-vis" title="${r.visible?'Hide':'Show'}">${r.visible?'👁':'○'}</button>
-          <button class="ibb rc-zoom" title="Zoom to route">⊕</button>
-          <button class="ibb rm rc-rem" title="Remove">✕</button>
+function filteredRides() {
+  const q = filter.q.trim().toLowerCase();
+  const cutoff = filter.range === 'all' ? null : Date.now() - (+filter.range) * 86400000;
+  return rides
+    .filter(r => (!q || r.name.toLowerCase().includes(q)) && (!cutoff || rideTime(r) >= cutoff))
+    .sort((a, b) => rideTime(b) - rideTime(a));
+}
+
+function renderFeed() {
+  const feed = document.getElementById('feed');
+  const list = filteredRides();
+  document.getElementById('feed-empty').hidden = rides.length > 0;
+  feed.hidden = !rides.length;
+  const km = list.reduce((s, r) => s + (r.stats.distance || 0), 0);
+  document.getElementById('feed-count').textContent = rides.length
+    ? `${list.length} ride${list.length !== 1 ? 's' : ''} · ${fmtNum(km, 0)} km`
+    : '';
+
+  feed.innerHTML = list.length || !rides.length ? list.map(r => {
+    const s = r.stats;
+    const picked = compareIds.has(r.id);
+    return `<article class="card${r.id === activeId ? ' active' : ''}${!r.visible ? ' muted' : ''}${picked ? ' picked' : ''}"
+        role="listitem" tabindex="0" data-id="${r.id}" style="--rc:${r.color}" aria-label="${esc(r.name)}">
+      <div class="card-thumb">${r.thumb}${compareMode ? `<span class="card-check">${icon('check')}</span>` : ''}</div>
+      <div class="card-body">
+        <div class="card-top">
+          <h3 class="card-title">${esc(r.name)}</h3>
+        </div>
+        <div class="card-date">${fmtDate(s.startDate)}${s.startDate ? ' · ' + fmtTime(s.startDate) : ''}<span class="tag">${esc(r.fileType)}</span></div>
+        <div class="card-metrics">
+          <span><b>${fmtNum(s.distance, 1)}</b> km</span>
+          <span><b>${fmtNum(s.eleGain, 0)}</b> m ↑</span>
+          <span><b>${fmtDur(s.movingTime)}</b></span>
         </div>
       </div>
-      <div class="rc-grid">
-        <div class="rc-kv">📅 <b>${fmtDate(r.stats.startDate)}</b></div>
-        <div class="rc-kv">⏱ <b>${fmtDur(r.stats.duration)}</b></div>
-        <div class="rc-kv">📏 <b>${r.stats.distance} km</b></div>
-        <div class="rc-kv">⬆ <b>${r.stats.eleGain} m</b></div>
-        <div class="rc-kv">⛰ <b>${r.stats.climbDist} km (&gt;8%)</b></div>
-        ${r.stats.avgHr   ? `<div class="rc-kv">♥ <b>${r.stats.avgHr} bpm</b></div>` : ''}
-        ${r.stats.avgSpeed? `<div class="rc-kv">⚡ <b>${r.stats.avgSpeed} km/h</b></div>` : ''}
-      </div>`;
+      <button class="icon-btn card-vis" title="${r.visible ? 'Hide on map' : 'Show on map'}" aria-pressed="${!r.visible}">${icon(r.visible ? 'eye' : 'eyeOff')}</button>
+    </article>`;
+  }).join('') : `<div class="note">No rides match your filters.</div>`;
 
-    el.querySelector('.rc-cb').onclick = (e) => {
-      e.stopPropagation();
-      selectRide(r.id, {ctrlKey:true, metaKey:true});
-    };
-    el.querySelector('.rc-vis').onclick = (e) => toggleVis(r.id, e);
-    el.querySelector('.rc-zoom').onclick = (e) => zoomTo(r.id, e);
-    el.querySelector('.rc-rem').onclick = (e) => removeRide(r.id, e);
-
-    if (r.laps && r.laps.length) {
-      const lapDiv = document.createElement('div');
-      lapDiv.innerHTML = '<div class="lap-hdr"><span>Lap</span><span>Time</span><span>Dist</span><span>HR</span><span>Spd</span></div>' +
-        r.laps.slice(0, 5).map((l, i) =>
-          '<div class="lap-row"><span>' + (i+1) + '</span><span>' + fmtDur(l.totalTime) + '</span><span>' + (l.distance ? l.distance.toFixed(1)+'k' : '—') + '</span><span>' + (l.avgHr||'—') + '</span><span>' + (l.avgSpeed ? l.avgSpeed+'k' : '—') + '</span></div>'
-        ).join('');
-      el.appendChild(lapDiv);
-    }
-    list.appendChild(el);
+  feed.querySelectorAll('.card').forEach(card => {
+    const r = rideById(card.dataset.id);
+    card.addEventListener('pointerenter', () => { if (view === 'list' && r && map.hasLayer(r.group)) { r.poly.setStyle({weight:6}); r.casing.setStyle({opacity:.7, weight:11}); r.casing.bringToFront(); r.poly.bringToFront(); } });
+    card.addEventListener('pointerleave', () => { if (view === 'list') applyMapStyles(); });
   });
 
-  document.getElementById('chip-count').textContent = `${rides.length} ride${rides.length!==1?'s':''}`;
-  document.getElementById('chip-live').style.display  = rides.length>1 && selectedIds.size===0 ? '' : 'none';
-  document.getElementById('rc-lbl').textContent = rides.length;
+  const modeBtn = document.getElementById('btn-compare-mode');
+  modeBtn.classList.toggle('on', compareMode);
+  modeBtn.hidden = rides.length < 2;
+  const bar = document.getElementById('compare-bar');
+  bar.hidden = !compareMode;
+  document.getElementById('compare-count').textContent = `${compareIds.size} selected`;
+  document.getElementById('btn-compare-go').disabled = compareIds.size < 2;
 }
 
 /* ═══════════════════════════════════════════════════════════════
-   RENDER STATS PANEL
+   RENDER — views
 ═══════════════════════════════════════════════════════════════ */
-async function renderStats() {
-  const body = document.getElementById('sb');
-  body.querySelectorAll('.sblk,.vsec,.ins,.insl').forEach(el=>el.remove());
-  const vis = visibleRides();
-  document.getElementById('st-empty').style.display = vis.length ? 'none' : '';
-  if (!vis.length) return;
-
-  if (currentTab==='compare') renderCompare(body, vis);
-  else if (currentTab==='vitals') renderVitals(body, vis);
-  else if (currentTab==='plan') renderPlan(body, vis);
-  else if (currentTab==='segments') await renderSegments(body, vis);
+function renderView() {
+  document.getElementById('view-list').hidden    = view !== 'list';
+  document.getElementById('view-detail').hidden  = view !== 'detail';
+  document.getElementById('view-compare').hidden = view !== 'compare';
+  document.getElementById('panel').dataset.view = view;
+  // Empty the hidden views so their ids (canvas etc.) never shadow the active view's
+  if (view !== 'detail')  document.getElementById('view-detail').innerHTML = '';
+  if (view !== 'compare') document.getElementById('view-compare').innerHTML = '';
+  if (view === 'detail') renderDetail();
+  else if (view === 'compare') renderCompare();
+  else destroyChart();
 }
 
-function renderCompare(body, vis) {
-  const isCombined = selectedIds.size > 1;
+function statTile(label, value, unit, accent) {
+  return `<div class="stat${accent ? ' accent' : ''}"><div class="stat-label">${label}</div><div class="stat-value">${value}${unit && value !== '—' ? `<small>${unit}</small>` : ''}</div></div>`;
+}
+
+function metricChips(list) {
+  const avail = Object.keys(METRICS).filter(k => {
+    const m = METRICS[k];
+    if (k === 'speed') return list.some(r => r.stats.hasSpeed);
+    return !m.has || list.some(r => r.stats[m.has]);
+  });
+  if (!avail.includes(chartMetric)) chartMetric = 'elevation';
+  return avail.length > 1
+    ? `<div class="seg-ctl" role="tablist">${avail.map(k => `<button role="tab" class="${k === chartMetric ? 'on' : ''}" aria-selected="${k === chartMetric}" onclick="setChartMetric('${k}')">${METRICS[k].short || METRICS[k].label}</button>`).join('')}</div>`
+    : '';
+}
+
+function renderDetail() {
+  const el = document.getElementById('view-detail');
+  const r = rideById(activeId);
+  if (!r) { backToList(); return; }
+  const s = r.stats;
+  const extra = [
+    ['Max speed', s.maxSpeed, 'km/h', 1],
+    ['Avg heart rate', s.avgHr, 'bpm', 0],
+    ['Max heart rate', s.maxHr, 'bpm', 0],
+    ['Avg power', s.avgPower, 'W', 0],
+    ['Max power', s.maxPower, 'W', 0],
+    ['Avg cadence', s.avgCad, 'rpm', 0],
+    ['Elevation loss', s.eleLoss, 'm', 0],
+    ['Highest point', s.maxEle, 'm', 0],
+    ['Lowest point', s.minEle, 'm', 0],
+    ['Climbing > 8%', s.climbDist, 'km', 2],
+    ['Training stress', s.tss, '', 0],
+    ['GPS points', s.pointCount, '', 0],
+  ].filter(([, v]) => v != null && v !== 0);
+
+  el.innerHTML = `
+    <div class="view-head">
+      <button class="icon-btn" onclick="backToList()" title="Back (Esc)">${icon('back')}</button>
+      <div class="view-titles">
+        <h2 class="view-title" style="--rc:${r.color}"><i class="dot"></i>${esc(r.name)}</h2>
+        <div class="view-meta">${fmtDate(s.startDate, true)}${s.startDate ? ' · ' + fmtTime(s.startDate) : ''}<span class="tag">${esc(r.fileType)}</span></div>
+      </div>
+      <button class="icon-btn" onclick="focusRides([rideById('${r.id}')])" title="Zoom to route">${icon('focus')}</button>
+    </div>
+
+    <div class="view-scroll">
+      <div class="stat-grid">
+        ${statTile('Distance', fmtNum(s.distance, 1), 'km', true)}
+        ${statTile('Elevation gain', fmtNum(s.eleGain, 0), 'm', true)}
+        ${statTile('Avg speed', fmtNum(s.avgSpeed, 1), 'km/h')}
+        ${statTile('Max gradient', fmtNum(s.maxGrade, 1), '%')}
+        ${statTile('Moving time', fmtDur(s.movingTime), '')}
+        ${statTile('Duration', fmtDur(s.duration), '')}
+      </div>
+
+      <div class="chart-card">
+        <div class="chart-head">
+          <span class="section-label">${METRICS[chartMetric].label} profile</span>
+          ${metricChips([r])}
+        </div>
+        <div class="chart-wrap"><canvas></canvas></div>
+      </div>
+
+      ${s.zonePct?.some(v => v > 0) ? `
+      <div class="card-block">
+        <div class="section-label">Heart rate zones <small>max ${cfg.maxHR} bpm</small></div>
+        <div class="zone-bar">${HR_ZONES.map((z, i) => s.zonePct[i] ? `<i style="flex:${s.zonePct[i]};background:${z.color}" title="${z.name}: ${s.zonePct[i]}%"></i>` : '').join('')}</div>
+        <div class="zone-legend">${HR_ZONES.map((z, i) => `<span><i style="background:${z.color}"></i>${z.name.split(' ')[0]} <b>${s.zonePct[i]}%</b></span>`).join('')}</div>
+      </div>` : ''}
+
+      ${r.laps?.length ? `
+      <div class="card-block">
+        <div class="section-label">Laps</div>
+        <table class="laps">
+          <thead><tr><th>#</th><th>Time</th><th>Dist</th><th>Speed</th><th>HR</th></tr></thead>
+          <tbody>${r.laps.map((l, i) => `<tr><td>${i + 1}</td><td>${fmtDur(l.totalTime)}</td><td>${l.distance != null ? fmtNum(l.distance, 2) + ' km' : '—'}</td><td>${l.avgSpeed != null ? fmtNum(l.avgSpeed, 1) : '—'}</td><td>${l.avgHr || '—'}</td></tr>`).join('')}</tbody>
+        </table>
+      </div>` : ''}
+
+      ${extra.length ? `
+      <details class="card-block more">
+        <summary class="section-label">More metrics</summary>
+        <dl class="kv">${extra.map(([k, v, u, d]) => `<dt>${k}</dt><dd>${fmtNum(v, d)}${u ? ' <small>' + u + '</small>' : ''}</dd>`).join('')}</dl>
+      </details>` : ''}
+
+      <div class="detail-actions">
+        <button class="btn sm" onclick="exportGPX(['${r.id}'])">${icon('download')}GPX</button>
+        <button class="btn sm" onclick="exportFIT('${r.id}')">${icon('download')}FIT</button>
+        <button class="btn sm danger" onclick="deleteRide('${r.id}')">${icon('trash')}Delete</button>
+      </div>
+    </div>`;
+
+  renderChart(el.querySelector('.chart-wrap canvas'), [r]);
+}
+
+function renderCompare() {
+  const el = document.getElementById('view-compare');
+  const vis = rides.filter(r => compareIds.has(r.id));
+  if (vis.length < 2) { backToList(); return; }
+
+  el.innerHTML = `
+    <div class="view-head">
+      <button class="icon-btn" onclick="backToList()" title="Back (Esc)">${icon('back')}</button>
+      <div class="view-titles">
+        <h2 class="view-title">Compare</h2>
+        <div class="view-meta">${vis.length} rides</div>
+      </div>
+      <button class="icon-btn" onclick="focusRides(rides.filter(r => compareIds.has(r.id)))" title="Zoom to rides">${icon('focus')}</button>
+    </div>
+    <div class="view-scroll">
+      <div class="legend">${vis.map(r => `<span style="--rc:${r.color}"><i></i>${esc(r.name)}</span>`).join('')}</div>
+      <div class="chart-card">
+        <div class="chart-head">
+          <span class="section-label">${METRICS[chartMetric].label}</span>
+          ${metricChips(vis)}
+        </div>
+        <div class="chart-wrap"><canvas></canvas></div>
+      </div>
+      <div class="seg-ctl wide" role="tablist">
+        ${[['metrics','Metrics'],['insights','Insights'],['segments','Segments']].map(([k, l]) =>
+          `<button role="tab" class="${k === compareTab ? 'on' : ''}" aria-selected="${k === compareTab}" onclick="setCompareTab('${k}')">${l}</button>`).join('')}
+      </div>
+      <div id="cmp-body"></div>
+    </div>`;
+
+  renderChart(el.querySelector('.chart-wrap canvas'), vis);
+  const body = document.getElementById('cmp-body');
+  if (compareTab === 'insights') renderPlan(body, vis);
+  else if (compareTab === 'segments') renderSegments(body, vis);
+  else renderCompareMetrics(body, vis);
+}
+
+function renderCompareMetrics(body, vis) {
   const metrics = [
-    {k:'distance',  lbl:'Distance',        fmt:v=>v+' km',          hi:true},
-    {k:'duration',  lbl:'Moving time',     fmt:fmtDur,              hi:false},
-    {k:'eleGain',   lbl:'Elevation gain',  fmt:v=>v+' m',           hi:false},
-    {k:'eleLoss',   lbl:'Elevation loss',  fmt:v=>v+' m',           hi:false},
-    {k:'maxEle',    lbl:'Max elevation',   fmt:v=>v+' m',           hi:false},
-    {k:'avgSpeed',  lbl:'Avg speed',       fmt:v=>v?v+' km/h':'—',  hi:true},
-    {k:'maxSpeed',  lbl:'Max speed',       fmt:v=>v?v+' km/h':'—',  hi:true},
-    {k:'avgHr',     lbl:'Avg heart rate',  fmt:v=>v?v+' bpm':'—',   hi:false},
-    {k:'maxHr',     lbl:'Max heart rate',  fmt:v=>v?v+' bpm':'—',   hi:false},
-    {k:'avgCad',    lbl:'Avg cadence',     fmt:v=>v?v+' rpm':'—',   hi:true},
-    {k:'avgPower',  lbl:'Avg power',       fmt:v=>v?v+' W':'—',     hi:true},
-    {k:'tss',       lbl:'Training stress', fmt:v=>v||'—',           hi:false},
+    {k:'distance',   lbl:'Distance',        fmt:v=>fmtNum(v,1)+' km',   hi:true},
+    {k:'movingTime', lbl:'Moving time',     fmt:fmtDur,                 hi:false},
+    {k:'eleGain',    lbl:'Elevation gain',  fmt:v=>fmtNum(v,0)+' m',    hi:true},
+    {k:'maxGrade',   lbl:'Max gradient',    fmt:v=>fmtNum(v,1)+' %',    hi:true},
+    {k:'avgSpeed',   lbl:'Avg speed',       fmt:v=>fmtNum(v,1)+' km/h', hi:true},
+    {k:'maxSpeed',   lbl:'Max speed',       fmt:v=>fmtNum(v,1)+' km/h', hi:true},
+    {k:'avgHr',      lbl:'Avg heart rate',  fmt:v=>v?v+' bpm':'—',      hi:false},
+    {k:'maxHr',      lbl:'Max heart rate',  fmt:v=>v?v+' bpm':'—',      hi:false},
+    {k:'avgCad',     lbl:'Avg cadence',     fmt:v=>v?v+' rpm':'—',      hi:true},
+    {k:'avgPower',   lbl:'Avg power',       fmt:v=>v?v+' W':'—',        hi:true},
+    {k:'tss',        lbl:'Training stress', fmt:v=>v||'—',              hi:false},
   ];
 
-  if (isCombined) {
-    const summary = document.createElement('div');
-    summary.className = 'insl';
-    summary.textContent = `Combined view: ${vis.length} rides`;
-    body.appendChild(summary);
-  }
-
-  metrics.forEach(m => {
+  body.innerHTML = metrics.map(m => {
     const nums = vis.map(r=>parseFloat(r.stats[m.k])).filter(v=>!isNaN(v)&&v>0);
-    if (!nums.length) return;
+    if (!nums.length) return '';
     const maxV = Math.max(...nums), minV = Math.min(...nums);
     const best = m.hi ? maxV : minV;
-
-    const blk = document.createElement('div');
-    blk.className = 'sblk';
-    blk.innerHTML = `<div class="slbl">${m.lbl}</div>`
+    return `<div class="cmp-block"><div class="cmp-label">${m.lbl}</div>`
       + vis.map(r => {
           const val = parseFloat(r.stats[m.k]);
-          const pct = maxV>0 ? Math.round((isNaN(val)?0:val)/maxV*100) : 0;
+          const pct = maxV>0 && !isNaN(val) ? Math.round(val/maxV*100) : 0;
           const isBest = val===best && nums.length>1;
-          return `<div class="sbr">
-            <div class="sbd" style="background:${r.color}"></div>
-            <div class="sbn" title="${esc(r.name)}">${esc(r.name)}</div>
-            <div class="sbb"><div class="sbf" style="width:${isNaN(pct)?0:pct}%;background:${r.color}"></div></div>
-            <div class="sbv${isBest?' best':''}" style="${isBest?'color:'+r.color:''}">${m.fmt(r.stats[m.k])}</div>
+          return `<div class="cmp-row" style="--rc:${r.color}">
+            <span class="cmp-name" title="${esc(r.name)}">${esc(r.name)}</span>
+            <span class="cmp-bar"><i style="width:${pct}%"></i></span>
+            <span class="cmp-val${isBest?' best':''}">${isNaN(val) ? '—' : m.fmt(r.stats[m.k])}</span>
           </div>`;
-        }).join('');
-    body.appendChild(blk);
-  });
-}
-
-function renderVitals(body, vis) {
-  vis.forEach(r => {
-    const s = r.stats;
-    const sec = document.createElement('div');
-    sec.className = 'vsec';
-    sec.innerHTML = `<div class="vsect" style="color:${r.color}">${esc(r.name)}</div>
-      <div class="vg">
-        <div class="vc"><div class="vcl">Distance</div><div class="vcv a">${s.distance} km</div></div>
-        <div class="vc"><div class="vcl">Duration</div><div class="vcv">${fmtDur(s.duration)}</div></div>
-        <div class="vc"><div class="vcl">Elev ↑ / ↓</div><div class="vcv b">↑${s.eleGain}m ↓${s.eleLoss}m</div></div>
-        <div class="vc"><div class="vcl">Max elevation</div><div class="vcv">${s.maxEle}m</div></div>
-        <div class="vc"><div class="vcl">Avg / max HR</div><div class="vcv c">${s.avgHr||'—'} / ${s.maxHr||'—'} bpm</div></div>
-        <div class="vc"><div class="vcl">Avg / max speed</div><div class="vcv">${s.avgSpeed||'—'} / ${s.maxSpeed||'—'} km/h</div></div>
-        <div class="vc"><div class="vcl">Avg cadence</div><div class="vcv">${s.avgCad||'—'} rpm</div></div>
-        <div class="vc"><div class="vcl">Avg / max power</div><div class="vcv">${s.avgPower||'—'} / ${s.maxPower||'—'} W</div></div>
-        <div class="vc"><div class="vcl">Training stress</div><div class="vcv ${(s.tss||0)>150?'d':(s.tss||0)>80?'c':'a'}">${s.tss||'—'}</div></div>
-        <div class="vc"><div class="vcl">GPS points</div><div class="vcv">${(s.pointCount||0).toLocaleString()}</div></div>
-      </div>`;
-
-    if (s.zonePct?.some(v=>v>0)) {
-      sec.innerHTML += `<div style="margin-top:4px"><div class="slbl">Heart rate zones</div>`
-        + HR_ZONES.map((z,i)=>`<div class="zr">
-            <div class="zl" style="color:${z.color}">${z.name}</div>
-            <div class="zbg"><div class="zf" style="width:${s.zonePct[i]}%;background:${z.color}"></div></div>
-            <div class="zp">${s.zonePct[i]}%</div>
-          </div>`).join('') + '</div>';
-    }
-    body.appendChild(sec);
-  });
+        }).join('') + '</div>';
+  }).join('');
 }
 
 function renderPlan(body, vis) {
-  if (vis.length < 2) {
-    const el = document.createElement('div');
-    el.className = 'ins';
-    el.innerHTML = '<b>Load 2+ rides</b> and set "All" to generate training insights.';
-    body.appendChild(el);
-    return;
-  }
-
-  const sorted = [...vis].sort((a,b) => {
-    if (!a.stats.startDate) return 1;
-    if (!b.stats.startDate) return -1;
-    return a.stats.startDate - b.stats.startDate;
-  });
+  const sorted = [...vis].sort((a,b) => rideTime(a) - rideTime(b));
   const latest = sorted[sorted.length-1];
   const prev   = sorted[sorted.length-2];
 
@@ -840,202 +1236,252 @@ function renderPlan(body, vis) {
   const bestDist = Math.max(...vis.map(r=>r.stats.distance));
   insights.push(`Based on longest ride (<b>${bestDist} km</b>), next target: <b>${Math.round(bestDist*1.08)} km</b> with up to <b>${Math.round(maxEleGain*1.1)}m</b> elevation.`);
 
-  if (!insights.length) insights.push('Load more rides to generate training insights.');
+  body.innerHTML = `<div class="section-label">Training insights</div>` +
+    insights.map(txt => `<div class="insight">${txt}</div>`).join('');
+}
 
-  const lbl = document.createElement('div');
-  lbl.className = 'insl'; lbl.textContent = 'Training insights';
-  body.appendChild(lbl);
-  insights.forEach(txt => {
-    const el = document.createElement('div');
-    el.className = 'ins'; el.innerHTML = txt;
-    body.appendChild(el);
+/* ═══════════════════════════════════════════════════════════════
+   CHART — profile with hover ↔ map sync
+═══════════════════════════════════════════════════════════════ */
+function setChartMetric(k) {
+  chartMetric = k;
+  saveState();
+  renderView();
+}
+
+function destroyChart() {
+  if (profileChart) { profileChart.destroy(); profileChart = null; }
+}
+
+function hexA(hex, a) {
+  const n = parseInt(hex.slice(1), 16);
+  return `rgba(${n >> 16 & 255},${n >> 8 & 255},${n & 255},${a})`;
+}
+
+// Vertical guide line at the hovered position
+const crosshairPlugin = {
+  id: 'crosshair',
+  afterDatasetsDraw(chart) {
+    const act = chart.tooltip?.getActiveElements?.();
+    if (!act?.length) return;
+    const x = act[0].element.x, {top, bottom} = chart.chartArea, c = chart.ctx;
+    c.save();
+    c.strokeStyle = 'rgba(226,232,240,.45)';
+    c.setLineDash([3, 3]);
+    c.beginPath(); c.moveTo(x, top); c.lineTo(x, bottom); c.stroke();
+    c.restore();
+  },
+};
+
+function renderChart(canvas, list) {
+  destroyChart();
+  const m = METRICS[chartMetric];
+  const single = list.length === 1;
+  const datasets = list.map(r => ({
+    label: r.name,
+    rideId: r.id,
+    data: r.smap.map(i => {
+      const v = r.points[i][m.key];
+      const valid = v != null && (m.key === 'ele' || v > 0);
+      return {x: r.cum[i], y: valid ? v : null, pi: i};
+    }),
+    borderColor: r.color,
+    backgroundColor: single ? (ctx => {
+      const {ctx: c, chartArea} = ctx.chart;
+      if (!chartArea) return 'transparent';
+      const g = c.createLinearGradient(0, chartArea.top, 0, chartArea.bottom);
+      g.addColorStop(0, hexA(r.color, .45));
+      g.addColorStop(1, hexA(r.color, 0));
+      return g;
+    }) : 'transparent',
+    fill: single ? 'start' : false,
+    borderWidth: single ? 2 : 1.75,
+    pointRadius: 0,
+    pointHoverRadius: 4,
+    pointHoverBackgroundColor: r.color,
+    pointHoverBorderColor: '#fff',
+    pointHoverBorderWidth: 2,
+    tension: .3,
+    spanGaps: true,
+  })).filter(ds => ds.data.some(d => d.y != null));
+
+  if (!datasets.length) {
+    canvas.parentElement.innerHTML = `<div class="note">No ${m.label.toLowerCase()} data in this ride.</div>`;
+    return;
+  }
+
+  const tick = {color:'#64748B', font:{size:10, family:'Inter'}};
+  profileChart = new Chart(canvas.getContext('2d'), {
+    type: 'line',
+    data: {datasets},
+    plugins: [crosshairPlugin],
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: false, parsing: false, normalized: true,
+      interaction: single ? {mode:'nearest', axis:'x', intersect:false} : {mode:'nearest', intersect:false},
+      onHover: (evt, els) => {
+        if (!els.length) { hideHoverMarker(); return; }
+        const ds = datasets[els[0].datasetIndex];
+        const pt = ds?.data[els[0].index];
+        const r = ds && rideById(ds.rideId);
+        if (r && pt) showHoverMarker(r, pt.pi, !single);
+      },
+      plugins: {
+        legend: {display:false},
+        tooltip: {
+          backgroundColor:'rgba(15,23,42,.94)', borderColor:'rgba(71,85,105,.6)', borderWidth:1,
+          titleColor:'#94A3B8', bodyColor:'#F1F5F9', padding:8, cornerRadius:8, displayColors:!single, boxWidth:8, boxHeight:8,
+          titleFont:{family:'Inter', size:10, weight:'500'}, bodyFont:{family:'Inter', size:12, weight:'600'},
+          callbacks: {
+            title: items => `${items[0].parsed.x.toFixed(2)} km`,
+            label: item => {
+              const v = item.parsed.y;
+              if (v == null) return null;
+              return `${single ? '' : item.dataset.label + ': '}${fmtNum(v, m.dp)} ${m.unit}`;
+            },
+          },
+        },
+      },
+      scales: {
+        x: {type:'linear', min:0, max: Math.max(...list.map(r => r.cum[r.cum.length - 1])),
+            ticks:{...tick, maxTicksLimit:6, callback:v => fmtNum(v, v < 10 ? 1 : 0) + ' km'},
+            grid:{color:'rgba(148,163,184,.08)'}, border:{display:false}},
+        y: {ticks:{...tick, maxTicksLimit:5, callback:v => fmtNum(v, 0)},
+            grid:{color:'rgba(148,163,184,.08)'}, border:{display:false}},
+      },
+    },
   });
+  canvas.addEventListener('mouseleave', hideHoverMarker);
 }
 
-async function setTab(tab, btn) {
-  currentTab = tab;
-  if (tab !== 'segments' && _segLayers) {
-    _segLayers.forEach(l => map.removeLayer(l));
-    _segLayers = [];
-  }
-  document.querySelectorAll('.stab').forEach(b=>b.classList.remove('on'));
-  btn.classList.add('on');
-  await renderStats();
+// Map → chart: hovering the active route moves the chart cursor
+function onRouteHover(r, latlng) {
+  if (view !== 'detail' || r.id !== activeId || !profileChart) return;
+  const k = Math.cos(latlng.lat * Math.PI / 180);
+  let best = 0, bestD = Infinity;
+  r.smap.forEach((pi, j) => {
+    const p = r.points[pi];
+    const dx = (p.lng - latlng.lng) * k, dy = p.lat - latlng.lat;
+    const d = dx*dx + dy*dy;
+    if (d < bestD) { bestD = d; best = j; }
+  });
+  const el = profileChart.getDatasetMeta(0).data[best];
+  if (!el) return;
+  const act = [{datasetIndex:0, index:best}];
+  profileChart.setActiveElements(act);
+  profileChart.tooltip.setActiveElements(act, {x:el.x, y:el.y});
+  profileChart.update('none');
+  showHoverMarker(r, r.smap[best]);
 }
-
-/* ═══════════════════════════════════════════════════════════════
-   CHART — all visible rides, with hover → map marker
-═══════════════════════════════════════════════════════════════ */
-function setChart(type, btn) {
-  currentChart = type;
-  document.querySelectorAll('.ct').forEach(b=>b.classList.remove('on'));
-  btn.classList.add('on');
-  renderChart();
-}
-
-function renderChart() {
-  const canvas = document.getElementById('pc');
-  const vis = visibleRides();
-  if (!vis.length) {
-    if (profileChart) { profileChart.destroy(); profileChart = null; }
-    const ctx = canvas.getContext('2d');
-    ctx.font = '12px "DM Mono", monospace';
-    ctx.fillStyle = '#5c6b5f';
-    ctx.textAlign = 'center';
-    ctx.fillText('Select a route to view elevation profile', canvas.width/2, canvas.height/2);
-    return;
-  }
-
-  const KEY = {elevation:'ele', hr:'hr', speed:'speed', cadence:'cad', power:'power'};
-  const UNITS = {elevation:' m', hr:' bpm', speed:' km/h', cadence:' rpm', power:' W'};
-  const key   = KEY[currentChart] || 'ele';
-
-  const hasData = vis.some(r => r.points.some(p => p[key]!=null && p[key]>0));
-  if (!hasData && currentChart !== 'elevation') {
-    const fallbackKey = 'ele';
-    renderChartWithKey(canvas, vis, fallbackKey, UNITS);
-    toast('No '+currentChart+' data in selected rides — showing elevation', 'warn');
-    return;
-  }
-
-  renderChartWithKey(canvas, vis, key, UNITS);
-}
-
-function renderChartWithKey(canvas, vis, key, UNITS) {
-  const datasets = vis.map(r => {
-    const cacheKey = `chart_${key}`;
-    if (r._cache && r._cache[cacheKey]) return r._cache[cacheKey];
-
-    const idxs = r.smap;
-    const data = idxs.map(i => {
-      const v = r.points[i][key];
-      const valid = v != null && (key==='ele' ? true : v > 0);
-      return {x: i/(r.points.length-1||1)*100, y: valid ? v : null, pi: i};
-    });
-    const ds = {
-      label: r.name,
-      data,
-      borderColor: r.color,
-      backgroundColor: r.color+'12',
-      borderWidth: 1.5,
-      pointRadius: 0,
-      fill: true,
-      tension: .25,
-      spanGaps: true,
-      rideId: r.id,
-    };
-    if (!r._cache) r._cache = {};
-    r._cache[cacheKey] = ds;
-    return ds;
-  }).filter(ds => ds.data.some(d=>d.y!=null));
-
-
-  if (!datasets.length) return;
-
+function clearChartHover() {
   if (profileChart) {
-    profileChart.data.datasets = datasets;
-    profileChart.update('none'); // Use 'none' for better performance
-  } else {
-    profileChart = new Chart(canvas.getContext('2d'), {
-      type: 'line',
-      data: {datasets},
-      options: {
-        responsive: true, maintainAspectRatio: false,
-        animation: {duration: 150},
-        interaction: {mode:'index', intersect:false},
-        onHover: (evt, elements) => {
-          if (!elements.length) { hideHoverMarker(); return; }
-          // With mode:'index', elements contains one entry per dataset at the same
-          // x-position. elements[0] always points to the first dataset (Route A),
-          // so we must find the element whose rendered y-pixel is closest to the
-          // mouse cursor — that is the line the user is actually hovering over.
-          const mouseY = evt.native?.offsetY ?? (evt.y ?? 0);
-          const el = elements.reduce((closest, cur) => {
-            const curDist  = Math.abs(cur.element.y  - mouseY);
-            const bestDist = Math.abs(closest.element.y - mouseY);
-            return curDist < bestDist ? cur : closest;
-          });
-          const ds = datasets[el.datasetIndex];
-          if (!ds) return;
-          const pt = ds.data[el.index];
-          if (!pt) return;
-          const ride = vis.find(r=>r.id===ds.rideId);
-          if (ride && pt.pi!=null) {
-            const origPt = ride.points[pt.pi];
-            if (origPt) showHoverMarker(origPt, ride.color, currentChart, pt.y);
-          }
-        },
-        plugins: {
-          legend:{display:false},
-          tooltip:{
-            backgroundColor:'#181c1a', borderColor:'rgba(255,255,255,.1)', borderWidth:1,
-            titleColor:'#5c6b5f', bodyColor:'#dfe8e0',
-            titleFont:{family:"'DM Mono',monospace",size:9},
-            bodyFont: {family:"'DM Mono',monospace",size:10},
-            padding:7,
-            callbacks:{
-              title: items => `${items[0].parsed.x.toFixed(1)}% of route`,
-              label: item => {
-                const v = item.parsed.y;
-                if (v==null) return null;
-                const unit = UNITS[currentChart]||'';
-                return ` ${item.dataset.label}: ${v.toFixed(0)}${unit}`;
-              },
-            }
-          }
-        },
-        scales:{
-          x:{type:'linear',min:0,max:100,
-            ticks:{color:'#5c6b5f',font:{family:"'DM Mono',monospace",size:9},callback:v=>v+'%',maxTicksLimit:6},
-            grid:{color:'rgba(255,255,255,.04)'}},
-          y:{ticks:{color:'#5c6b5f',font:{family:"'DM Mono',monospace",size:9},maxTicksLimit:5},
-             grid:{color:'rgba(255,255,255,.04)'}}
-        }
-      }
-    });
-    canvas.addEventListener('mouseleave', hideHoverMarker);
+    profileChart.setActiveElements([]);
+    profileChart.tooltip.setActiveElements([], {x:0, y:0});
+    profileChart.update('none');
   }
+  hideHoverMarker();
 }
 
-
-
-
-
-
-      
-
-
 /* ═══════════════════════════════════════════════════════════════
-   HOVER MARKER — chart → map sync
+   HOVER MARKER — telemetry tooltip on the map
 ═══════════════════════════════════════════════════════════════ */
-function showHoverMarker(pt, color, type, value) {
-  if (!pt?.lat || !pt?.lng) return;
-  const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
-  hoverMarker.setIcon(L.divIcon({
-    className:'',
-    // Outer ring uses the route color so it's visually obvious which route is traced.
-    html:`<div style="width:14px;height:14px;border-radius:50%;background:${color};border:3px solid ${isDark ? '#fff' : '#000'};box-shadow:0 0 0 3px ${color},0 0 6px 3px ${color}55;transform:translate(-7px,-7px)"></div>`,
-    iconSize:[0,0],
-  }));
-  hoverMarker.setLatLng([pt.lat, pt.lng]);
+function showHoverMarker(r, i, withName) {
+  const p = r.points[i];
+  if (!p || p.lat == null) return;
+  hoverMarker.setLatLng([p.lat, p.lng]);
   if (!map.hasLayer(hoverMarker)) hoverMarker.addTo(map);
-
-  const units = {elevation:'m', hr:'bpm', speed:'km/h', cadence:'rpm', power:'W'};
-  const valStr = value != null ? `${value.toFixed(0)} ${units[type]||''}` : '';
-  const lbl = document.getElementById('mhl');
-  lbl.textContent = `${valStr}  •  ${pt.lat.toFixed(5)}, ${pt.lng.toFixed(5)}`;
-  lbl.style.display = '';
-
-  try {
-    const px = map.latLngToContainerPoint([pt.lat,pt.lng]);
-    const mr = document.getElementById('map').getBoundingClientRect();
-    lbl.style.left = Math.min(px.x+14, mr.width-200)+'px';
-    lbl.style.top  = Math.max(px.y-28, 4)+'px';
-  } catch {}
+  hoverMarker.getElement()?.style.setProperty('--c', r.color);
+  const rows = [
+    ['Distance', fmtNum(r.cum[i], 2) + ' km'],
+    ['Elevation', fmtNum(p.ele, 0) + ' m'],
+    ['Grade', fmtNum(gradeAt(r, i), 1) + ' %'],
+    p.speed != null && ['Speed', fmtNum(p.speed, 1) + ' km/h'],
+    p.hr && ['Heart rate', p.hr + ' bpm'],
+    p.power && ['Power', p.power + ' W'],
+    p.cad && ['Cadence', p.cad + ' rpm'],
+  ].filter(Boolean);
+  hoverMarker.setTooltipContent(
+    (withName ? `<div class="tt-name" style="--c:${r.color}">${esc(r.name)}</div>` : '') +
+    `<div class="tt-grid">${rows.map(([k, v]) => `<span>${k}</span><b>${v}</b>`).join('')}</div>`
+  );
 }
 function hideHoverMarker() {
-  if (map.hasLayer(hoverMarker)) map.removeLayer(hoverMarker);
-  document.getElementById('mhl').style.display = 'none';
+  if (hoverMarker && map.hasLayer(hoverMarker)) map.removeLayer(hoverMarker);
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   PANEL — desktop collapse + mobile bottom sheet
+═══════════════════════════════════════════════════════════════ */
+const isMobile = () => MOBILE_MQ.matches;
+
+function setPanelCollapsed(b) {
+  panelCollapsed = b;
+  document.body.classList.toggle('panel-collapsed', b);
+  saveState();
+}
+
+function sheetVisible(state) {
+  const H = window.innerHeight;
+  if (state === 'full') return H - 56;
+  if (state === 'half') return Math.round(H * 0.5);
+  return 132;
+}
+function setSheet(state) {
+  sheet = state;
+  layoutSheet();
+}
+function layoutSheet(px) {
+  const panel = document.getElementById('panel');
+  if (!isMobile()) {
+    panel.style.height = '';
+    delete document.body.dataset.sheet;
+    document.documentElement.style.setProperty('--sheet-visible', '0px');
+    return;
+  }
+  const h = px != null ? px : sheetVisible(sheet);
+  panel.style.height = h + 'px';
+  panel.dataset.sheet = sheet;
+  document.body.dataset.sheet = sheet;
+  document.documentElement.style.setProperty('--sheet-visible', h + 'px');
+}
+
+function initSheetDrag() {
+  const panel = document.getElementById('panel');
+  const grip = document.getElementById('sheet-handle');
+  let startY = 0, startH = 0, t0 = 0, dragging = false, moved = false;
+
+  const down = e => {
+    if (!isMobile() || e.target.closest('button,input,select,a')) return;
+    dragging = true; moved = false;
+    startY = e.clientY; startH = panel.offsetHeight; t0 = Date.now();
+    panel.classList.add('dragging');
+    grip.setPointerCapture?.(e.pointerId);
+  };
+  const move = e => {
+    if (!dragging) return;
+    const dy = e.clientY - startY;
+    if (Math.abs(dy) > 4) moved = true;
+    layoutSheet(Math.max(96, Math.min(window.innerHeight - 40, startH - dy)));
+  };
+  const up = e => {
+    if (!dragging) return;
+    dragging = false;
+    panel.classList.remove('dragging');
+    const h = panel.offsetHeight, dy = e.clientY - startY, fast = Date.now() - t0 < 250 && Math.abs(dy) > 30;
+    const order = ['peek', 'half', 'full'];
+    if (!moved) {
+      setSheet(sheet === 'peek' ? 'half' : sheet === 'half' ? 'full' : 'half');
+    } else if (fast) {
+      const i = order.indexOf(sheet) + (dy < 0 ? 1 : -1);
+      setSheet(order[Math.max(0, Math.min(2, i))]);
+    } else {
+      setSheet(order.reduce((a, s) => Math.abs(sheetVisible(s) - h) < Math.abs(sheetVisible(a) - h) ? s : a, 'peek'));
+    }
+  };
+  grip.addEventListener('pointerdown', down);
+  panel.querySelector('.panel-head').addEventListener('pointerdown', down);
+  window.addEventListener('pointermove', move);
+  window.addEventListener('pointerup', up);
+  window.addEventListener('pointercancel', up);
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -1043,10 +1489,11 @@ function hideHoverMarker() {
 ═══════════════════════════════════════════════════════════════ */
 function ensureSupabaseClient() {
   if (!sbClient) {
+    if (!cfg.url || !cfg.key) { toast('Add your Supabase URL and key under Settings → Connections', 'err'); return null; }
     try {
       sbClient = window.supabase.createClient(cfg.url, cfg.key);
     } catch(e) {
-      toast('Supabase initialization failed', 'err');
+      toast('Supabase initialization failed: ' + e.message, 'err');
       return null;
     }
   }
@@ -1082,12 +1529,12 @@ async function requestAccess() {
   const name  = document.getElementById('reg-name').value.trim();
   const email = document.getElementById('reg-email').value.trim();
   const pass  = document.getElementById('reg-pass').value;
-  if (!name||!email||!pass) { toast('Fill in all fields', 'err'); return; }
+  if (!name||!email||!pass) { toast('Fill in name, email and password', 'err'); return; }
   if (pass.length < 8)      { toast('Password must be at least 8 characters', 'err'); return; }
 
   try {
     // 1. Create auth account (disabled until approved — use signUp + email confirm disabled)
-    const {data, error} = await sbClient.auth.signUp({
+    const {error} = await sbClient.auth.signUp({
       email, password:pass,
       options:{data:{name, role:'pending'}}
     });
@@ -1115,56 +1562,72 @@ function signOut() {
   toast('Signed out');
 }
 
+let _signedInFor = null;
 async function onSignedIn() {
-  const chip = document.getElementById('chip-user');
-  chip.textContent = '● '+( currentUser?.user_metadata?.name || currentUser?.email || 'signed in');
-  chip.style.display = '';
-  chip.className = 'chip on';
-  document.getElementById('btn-admin').style.display = isAdmin() ? '' : 'none';
-  document.getElementById('btn-sign-out').style.display = '';
+  renderHeader();
+  if (_signedInFor === currentUser?.id) return;   // onAuthStateChange re-fires on load
+  _signedInFor = currentUser?.id;
   closeSettings();
-  toast('Welcome back!', 'ok');
-  // Load rides from Supabase
+  toast('Signed in as ' + userLabel(), 'ok');
   await loadRidesFromSupabase();
 }
 function onSignedOut() {
-  document.getElementById('chip-user').style.display = 'none';
-  document.getElementById('btn-admin').style.display = 'none';
-  document.getElementById('btn-sign-out').style.display = 'none';
+  _signedInFor = null;
+  renderHeader();
 }
 function isAdmin() {
   return currentUser?.user_metadata?.role === 'admin' ||
          currentUser?.app_metadata?.role  === 'admin';
+}
+const userLabel = () => currentUser?.user_metadata?.name || currentUser?.email || 'signed in';
+
+function renderHeader() {
+  const av = document.getElementById('btn-avatar');
+  if (currentUser) {
+    const initials = userLabel().split(/[\s@.]+/).filter(Boolean).slice(0, 2).map(w => w[0].toUpperCase()).join('');
+    av.innerHTML = currentUser.user_metadata?.avatar_url
+      ? `<img src="${esc(currentUser.user_metadata.avatar_url)}" alt=""/>`
+      : `<span>${esc(initials)}</span>`;
+    av.classList.add('signed-in');
+    av.title = userLabel() + ' — account & settings';
+  } else {
+    av.innerHTML = icon('user');
+    av.classList.remove('signed-in');
+    av.title = 'Sign in & settings';
+  }
+  document.getElementById('btn-admin').hidden = !isAdmin();
+  document.getElementById('btn-sync').hidden = !(sbClient && currentUser);
+  updateUnsavedChip();
+  updateDBBadge();
 }
 
 /* ═══════════════════════════════════════════════════════════════
    ADMIN PANEL
 ═══════════════════════════════════════════════════════════════ */
 async function openAdmin() {
-  document.getElementById('admin-mb').style.display = 'flex';
+  document.getElementById('admin-mb').classList.add('open');
   loadAdminData();
 }
+function closeAdmin() { document.getElementById('admin-mb').classList.remove('open'); }
 async function loadAdminData() {
   if (!sbClient) { toast('Supabase not configured', 'err'); return; }
   const {data, error} = await sbClient.from('ridecomp_users').select('*').order('requested_at',{ascending:false});
   const list = document.getElementById('admin-list');
-  if (error || !data) { list.innerHTML = '<div class="ins">Error loading users: ' + esc(error?.message || 'unknown') + '</div>'; return; }
-  if (!data.length)   { list.innerHTML = '<div class="ins">No registration requests.</div>'; return; }
+  if (error || !data) { list.innerHTML = '<div class="note">Error loading users: ' + esc(error?.message || 'unknown') + '</div>'; return; }
+  if (!data.length)   { list.innerHTML = '<div class="note">No registration requests.</div>'; return; }
 
   list.innerHTML = data.map(u => {
     const ago = u.requested_at ? timeSince(new Date(u.requested_at)) : '—';
-    const exp = u.expires_at && u.role==='pending' ? ' (expires '+timeSince(new Date(u.expires_at))+')' : '';
-    const statusClass = {pending:'sb-pending',member:'sb-approved',admin:'sb-approved',denied:'sb-denied'}[u.role]||'sb-pending';
+    const exp = u.expires_at && u.role==='pending' ? ' · expires '+timeSince(new Date(u.expires_at)) : '';
     return `<div class="admin-row">
-      <div>
+      <div class="admin-who">
         <div class="admin-name">${esc(u.name||u.email)}</div>
-        <div class="admin-email">${esc(u.email)}</div>
+        <div class="admin-email">${esc(u.email)} · ${ago}${exp}</div>
       </div>
-      <div class="admin-time">${ago}${exp}</div>
-      <span class="status-badge ${statusClass}">${u.role}</span>
+      <span class="pill ${u.role}">${esc(u.role)}</span>
       ${u.role==='pending' ? `
-        <button class="btn" style="padding:3px 8px;font-size:10px" onclick="approveUser('${u.id}','${esc(u.email)}')">✓ Approve</button>
-        <button class="btn dbtn" style="padding:3px 8px;font-size:10px" onclick="denyUser('${u.id}')">✕ Deny</button>` : ''}
+        <button class="btn sm primary" onclick="approveUser('${esc(u.id)}','${esc(u.email)}')">Approve</button>
+        <button class="btn sm danger" onclick="denyUser('${esc(u.id)}')">Deny</button>` : ''}
     </div>`;
   }).join('');
 }
@@ -1183,114 +1646,140 @@ async function denyUser(id) {
   toast('User denied');
   loadAdminData();
 }
-function closeAdminBg(e) { if(e.target===document.getElementById('admin-mb')) document.getElementById('admin-mb').style.display='none'; }
+function closeAdminBg(e) { if (e.target === document.getElementById('admin-mb')) closeAdmin(); }
 
 function timeSince(d) {
   if (!d||isNaN(d)) return '?';
   const s = Math.floor((Date.now()-d)/1000);
-  if (s < 60) return s+'s ago';
-  if (s < 3600) return Math.floor(s/60)+'m ago';
-  if (s < 86400) return Math.floor(s/3600)+'h ago';
-  return Math.floor(s/86400)+'d ago';
+  const fut = s < 0, a = Math.abs(s);
+  const v = a < 60 ? a+'s' : a < 3600 ? Math.floor(a/60)+'m' : a < 86400 ? Math.floor(a/3600)+'h' : Math.floor(a/86400)+'d';
+  return fut ? 'in '+v : v+' ago';
 }
 
 /* ═══════════════════════════════════════════════════════════════
    SETTINGS MODAL
 ═══════════════════════════════════════════════════════════════ */
 function openSettings() {
-  document.getElementById('cfg-maxhr').value = cfg.maxHR||190;
-
   const loggedIn = !!currentUser;
-  // Always show the main settings container and the config section
-  document.getElementById('view-settings').style.display = '';
-  document.getElementById('view-config').style.display = '';
-
-  // Show auth view only if not logged in
-  document.getElementById('view-auth').style.display = loggedIn ? 'none' : '';
-  // Show user-specific settings only if logged in
-  document.getElementById('view-user-settings').style.display = loggedIn ? '' : 'none';
-  // Show sign-out button only if logged in
-  document.getElementById('btn-sign-out').style.display = loggedIn ? '' : 'none';
-
+  document.getElementById('view-auth').hidden = loggedIn;
+  document.getElementById('view-account').hidden = !loggedIn;
+  if (loggedIn) {
+    document.getElementById('account-avatar').innerHTML = document.getElementById('btn-avatar').innerHTML;
+    document.getElementById('account-name').textContent = currentUser.user_metadata?.name || 'Signed in';
+    document.getElementById('account-email').textContent = currentUser.email || '';
+  }
+  document.getElementById('cfg-maxhr').value    = cfg.maxHR || 190;
+  document.getElementById('cfg-sb-url').value   = cfg.url || '';
+  document.getElementById('cfg-sb-key').value   = cfg.key || '';
+  document.getElementById('cfg-maptiler').value = cfg.mapTilerKey || '';
+  document.getElementById('cfg-mapbox').value   = cfg.mapboxToken || '';
   document.getElementById('mb').classList.add('open');
 }
 function closeSettings() { document.getElementById('mb').classList.remove('open'); }
 function closeModalBg(e) { if(e.target===document.getElementById('mb')) closeSettings(); }
 
 function saveSettings() {
-  cfg.maxHR = parseInt(document.getElementById('cfg-maxhr').value)||190;
+  const val = id => document.getElementById(id).value.trim();
+  const prev = {...cfg};
+  cfg.maxHR = parseInt(val('cfg-maxhr')) || 190;
+  cfg.url = val('cfg-sb-url');
+  cfg.key = val('cfg-sb-key');
+  cfg.mapTilerKey = val('cfg-maptiler');
+  cfg.mapboxToken = val('cfg-mapbox');
   localStorage.setItem('ridecomp_cfg', JSON.stringify(cfg));
 
-  if (cfg.url && cfg.key) {
-    try {
-      sbClient = window.supabase.createClient(cfg.url, cfg.key);
-      // Re-check session
-      sbClient.auth.getUser().then(({data}) => {
-        if (data?.user) { currentUser = data.user; onSignedIn(); }
-      });
-      updateDBBadge(true);
-      document.getElementById('btn-sync').style.display = '';
-      toast('Settings saved ✓', 'ok');
-    } catch(e) { sbClient=null; updateDBBadge(false); toast('Supabase error: '+e.message,'err'); }
-  } else {
-    sbClient = null; updateDBBadge(false);
-    document.getElementById('btn-sync').style.display = 'none';
-    toast('Settings saved (local only)');
+  if (cfg.mapTilerKey !== prev.mapTilerKey || cfg.mapboxToken !== prev.mapboxToken) {
+    tileFallback = false;
+    setTileLayer(currentTile);
   }
+  if (cfg.maxHR !== prev.maxHR) {
+    // HR zones / TSS depend on max HR
+    rides.forEach(r => { r.stats = computeStats(r.points); idbPut(toRecord(r)).catch(()=>{}); });
+  }
+  if (cfg.url !== prev.url || cfg.key !== prev.key) {
+    sbClient = null; currentUser = null; _signedInFor = null;
+    if (cfg.url && cfg.key) initSupabase();
+    else renderHeader();
+  }
+  toast('Settings saved', 'ok');
   closeSettings();
+  refresh();
 }
 
-function updateDBBadge(ok) {
+function updateDBBadge() {
   const dot = document.getElementById('dbdot');
   const lbl = document.getElementById('dblbl');
-  if (ok)        { dot.className='ok';   lbl.textContent='Supabase connected'; }
-  else if(cfg.url){ dot.className='warn'; lbl.textContent='Supabase not connected'; }
-  else           { dot.className='';     lbl.textContent='Local storage only'; }
+  if (sbClient && currentUser) { dot.className='ok';   lbl.textContent='Cloud sync on · ' + userLabel(); }
+  else if (sbClient)           { dot.className='warn'; lbl.textContent='Sign in to sync to the cloud'; }
+  else                         { dot.className='';     lbl.textContent='Saved on this device'; }
 }
 
 function updateUnsavedChip() {
-  document.getElementById('chip-unsaved').style.display = pendingSync.size&&cfg.url ? '' : 'none';
+  document.getElementById('chip-unsaved').hidden = !(pendingSync.size && sbClient && currentUser);
 }
 
 /* ═══════════════════════════════════════════════════════════════
    SUPABASE SYNC
 ═══════════════════════════════════════════════════════════════ */
-async function loadRidesFromSupabase() {
-  if (!sbClient || !currentUser) return;
+async function initSupabase() {
+  if (!window.supabase) { console.warn('supabase-js failed to load'); return; }
   try {
-    const {data, error} = await sbClient.from('ridecomp_rides').select('*').eq('user_id', currentUser.id);
-    if (error) throw error;
-    if (!data || !data.length) return;
-    loader(true, `Loading ${data.length} ride(s) from cloud…`);
-    for (const r of data) {
-      if (rides.find(x => x.id === r.id)) continue;
-      await idbPut(r).catch(() => {});
-      hydrate(r);
-    }
-    loader(false);
-    refresh();
-    toast(`Loaded ${data.length} ride(s) from cloud`, 'ok');
+    sbClient = window.supabase.createClient(cfg.url, cfg.key);
+    
+    // Restore session
+    const {data, error} = await sbClient.auth.getUser();
+    if (error && error.name !== 'AuthSessionMissingError') console.warn('Supabase auth:', error.message);
+    if (data?.user) { currentUser = data.user; onSignedIn(); }
+    // Listen for auth changes
+    sbClient.auth.onAuthStateChange((_evt, session) => {
+      currentUser = session?.user || null;
+      if (currentUser) onSignedIn(); else onSignedOut();
+    });
   } catch(e) {
-    console.error('Failed to load rides from Supabase', e);
+    sbClient = null;
+    
+    console.warn('Supabase init failed', e);
   }
+  renderHeader();
+}
+
+let _cloudLoad = null;
+function loadRidesFromSupabase() {
+  // Shared promise: sign-in can fire twice on load and would hydrate rides twice
+  return _cloudLoad || (_cloudLoad = (async () => {
+    if (!sbClient || !currentUser) return;
+    try {
+      const {data, error} = await sbClient.from('ridecomp_rides').select('*').eq('user_id', currentUser.id);
+      if (error) throw error;
+      const fresh = (data || []).filter(r => !rideById(r.id));
+      if (!fresh.length) return;
+      loader(true, `Loading ${fresh.length} ride(s) from cloud…`);
+      for (const r of fresh) {
+        const ride = hydrate(r);
+        if (ride) await idbPut(toRecord(ride)).catch(() => {});
+      }
+      loader(false);
+      refresh();
+      toast(`Loaded ${fresh.length} ride(s) from cloud`, 'ok');
+    } catch(e) {
+      loader(false);
+      console.error('Failed to load rides from Supabase', e);
+      toast('Could not load cloud rides: ' + e.message, 'err');
+    } finally {
+      _cloudLoad = null;
+    }
+  })());
 }
 
 async function syncToSupabase() {
   if (!sbClient) { toast('Configure Supabase in Settings first','err'); return; }
   if (!currentUser) { toast('Please sign in to sync rides','err'); return; }
-  const toSync = rides.filter(r=>pendingSync.has(r.id));
+  let toSync = rides.filter(r=>pendingSync.has(r.id));
   if (!toSync.length) {
-    // If no pending but rides exist, mark all for sync
-    if (rides.length > 0) {
-      rides.forEach(r => pendingSync.add(r.id));
-      updateUnsavedChip();
-      toast('Rides marked for sync - click Sync again','ok');
-      return;
-    }
-    toast('No rides to sync');
-    return;
+    if (!rides.length) { toast('No rides to sync'); return; }
+    toSync = rides;   // nothing pending → re-upload everything
   }
-  loader(true,`Syncing ${toSync.length} ride(s) as user ${currentUser.id}…`);
+  loader(true,`Syncing ${toSync.length} ride(s)…`);
   let ok=0, fail=0;
   for (const r of toSync) {
     try {
@@ -1303,7 +1792,7 @@ async function syncToSupabase() {
         stats:r.stats,
         color:r.color
       };
-       const {data, error} = await sbClient.from('ridecomp_rides').upsert(payload);
+       const {error} = await sbClient.from('ridecomp_rides').upsert(payload);
        if (error) throw error;
        pendingSync.delete(r.id); ok++;
     } catch(e) {
@@ -1314,17 +1803,17 @@ async function syncToSupabase() {
   }
   loader(false);
   updateUnsavedChip();
-  toast(fail ? `Synced ${ok}, failed ${fail}`:`${ok} ride(s) synced ✓`, fail?'err':'ok');
+  toast(fail ? `Synced ${ok}, failed ${fail}`:`${ok} ride(s) synced`, fail?'err':'ok');
 }
 
 /* ═══════════════════════════════════════════════════════════════
    LOCAL JSON BACKUP
 ═══════════════════════════════════════════════════════════════ */
 async function exportJSON() {
-  const all = await idbAll() || [];
+  const all = (idb ? await idbAll() : null) || rides.map(toRecord);
+  if (!all.length) { toast('No rides to back up', 'err'); return; }
   const blob = new Blob([JSON.stringify({version:VER, exportedAt:new Date().toISOString(), rides:all},null,2)],{type:'application/json'});
-  const a = Object.assign(document.createElement('a'),{href:URL.createObjectURL(blob),download:`ridecomp-${new Date().toISOString().slice(0,10)}.json`});
-  a.click();
+  downloadBlob(blob, `ridemap-${new Date().toISOString().slice(0,10)}.json`);
   toast('Backup downloaded');
 }
 function importJSON(input) {
@@ -1336,11 +1825,12 @@ function importJSON(input) {
       const arr = parsed.rides || (Array.isArray(parsed)?parsed:[]);
       if (!arr.length) throw new Error('No rides found in backup');
       let added=0;
-      for (const r of arr) {
-        if (!r.id||!r.points) continue;
-        if (rides.find(x=>x.id===r.id)) continue;
-        await idbPut(r).catch(()=>{});
-        hydrate(r); added++;
+      for (const rec of arr) {
+        if (!rec.id||!rec.points) continue;
+        const r = hydrate(rec);
+        if (!r) continue;
+        await idbPut(toRecord(r)).catch(()=>{});
+        added++;
       }
       refresh();
       toast(`Imported ${added} ride(s)`, 'ok');
@@ -1351,69 +1841,54 @@ function importJSON(input) {
     loader(false);
   });
 }
-async function nukeDB() {
-  if (!confirm('Delete all locally stored rides? This cannot be undone.')) return;
-  await idbClear().catch(()=>{});
-  toast('Local database cleared');
-  closeSettings();
+
+function downloadBlob(blob, filename) {
+  const a = Object.assign(document.createElement('a'), {href:URL.createObjectURL(blob), download:filename});
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
 }
-
-/* ═══════════════════════════════════════════════════════════════
-   HYDRATE — restore ride from DB (no re-parse)
-═══════════════════════════════════════════════════════════════ */
-function hydrate(r) {
-  const color = r.color || COLORS[rides.length%COLORS.length];
-  const pts   = r.points || [];
-  // Convert ts strings back to Date objects
-  pts.forEach(p => { if (p.ts && typeof p.ts==='string') p.ts = new Date(p.ts); });
-  const poly = L.polyline(pts.map(p=>[p.lat,p.lng]),{color,weight:2.5,opacity:.88,smoothFactor:1});
-  
-  const steepPolys = buildClimbPolylines(pts);
-  const group = L.layerGroup([poly, ...steepPolys]).addTo(map);
-
-  rides.push({
-    id:r.id, name:r.name, color,
-    points:pts, smap:buildSampleMap(pts),
-    stats: r.stats || computeStats(pts),
-    fileType:r.fileType||'gpx',
-    laps: r.laps||[],
-    poly, steepPolys, group, visible:true,
-  });
-}
-
 
 /* ═══════════════════════════════════════════════════════════════
    MASTER REFRESH
 ═══════════════════════════════════════════════════════════════ */
 let _refreshTimer;
-async function refresh() {
+function refresh() {
   clearTimeout(_refreshTimer);
-  _refreshTimer = setTimeout(async () => {
-    applyPolylineVisibility();
-    renderSidebar();
-    await renderStats();
-    renderChart();
+  _refreshTimer = setTimeout(() => {
+    applyMapStyles();
+    renderFeed();
+    renderView();
   }, 16);
 }
 
 /* ═══════════════════════════════════════════════════════════════
    UTILITIES
 ═══════════════════════════════════════════════════════════════ */
+function fmtNum(v, dp = 0) {
+  if (v == null || v === '' || isNaN(v)) return '—';
+  return Number(v).toLocaleString('en-US', {minimumFractionDigits:dp, maximumFractionDigits:dp});
+}
 function fmtDur(s) {
   if (!s||s<=0) return '—';
-  return Math.floor(s/3600)>0 ? `${Math.floor(s/3600)}h ${String(Math.floor((s%3600)/60)).padStart(2,'0')}m` : `${Math.floor(s/60)}m`;
+  const h = Math.floor(s/3600), m = Math.floor((s%3600)/60);
+  return h > 0 ? `${h}h ${String(m).padStart(2,'0')}m` : m > 0 ? `${m}m` : `${Math.round(s)}s`;
 }
-function fmtDate(d) {
-  if (!d||!(d instanceof Date)||isNaN(d)) return '—';
-  return d.toLocaleDateString('en-GB',{day:'2-digit',month:'short',year:'2-digit'});
+function fmtDate(d, long) {
+  if (!d||!(d instanceof Date)||isNaN(d)) return 'No date';
+  return d.toLocaleDateString('en-GB', long ? {weekday:'short', day:'numeric', month:'short', year:'numeric'} : {day:'numeric', month:'short', year:'numeric'});
 }
-function esc(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function fmtTime(d) {
+  return d.toLocaleTimeString('en-GB', {hour:'2-digit', minute:'2-digit'});
+}
+function esc(s) { return String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
 
 let _tt;
 function toast(msg, type='') {
   const el = document.getElementById('toast');
   el.textContent = msg;
-  el.className = 'show' + (type==='err'?' err':type==='ok'?' ok':'');
+  el.className = 'show' + (type ? ' ' + type : '');
   clearTimeout(_tt);
   _tt = setTimeout(()=>el.className='', type==='err'?4500:2600);
 }
@@ -1422,90 +1897,146 @@ function loader(show, msg='Processing…') {
   document.getElementById('ldr').className = show?'open':'';
 }
 
-/* ═══════════════════════════════════════════════════════════════
-   THEME TOGGLE
-═══════════════════════════════════════════════════════════════ */
-function toggleTheme() {
-  const html = document.documentElement;
-  const next = html.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
-  html.setAttribute('data-theme', next);
-  localStorage.setItem('ridecomp_theme', next);
-  
-  const tile = next === 'dark' ? 'dark' : 'street';
-  const btn = document.querySelector('.mb.on') || document.querySelectorAll('.mb')[0];
-  setTile(tile, btn);
-  saveState();
-}
+function openHelp()  { document.getElementById('help-mb').classList.add('open'); }
+function closeHelp() { document.getElementById('help-mb').classList.remove('open'); }
+function closeHelpBg(e) { if (e.target === document.getElementById('help-mb')) closeHelp(); }
 
 /* ═══════════════════════════════════════════════════════════════
    STATE PERSISTENCE
  ═══════════════════════════════════════════════════════════════ */
 function saveState() {
-  const state = {
-    theme: document.documentElement.getAttribute('data-theme'),
-    sbHidden: document.getElementById('sidebar').classList.contains('hidden'),
-    spHidden: document.getElementById('sp').classList.contains('hidden'),
-    sbCollapsed: document.getElementById('sidebar').classList.contains('sidebar-collapsed'),
-    spCollapsed: document.getElementById('sp').classList.contains('sidebar-collapsed'),
-    selectedIds: Array.from(selectedIds),
-    multiSelect: multiSelectMode
-  };
-  localStorage.setItem('ridecomp_state', JSON.stringify(state));
+  try {
+    localStorage.setItem('ridecomp_state', JSON.stringify({
+      basemap: currentTile,
+      panelCollapsed,
+      chartMetric,
+      hidden: rides.filter(r => !r.visible).map(r => r.id),
+    }));
+  } catch {}
 }
 
 function loadState() {
-  const saved = localStorage.getItem('ridecomp_state');
-  if (!saved) return;
   try {
-    const state = JSON.parse(saved);
-    if (state.theme) document.documentElement.setAttribute('data-theme', state.theme);
-    if (state.sbHidden) document.getElementById('sidebar').classList.add('hidden');
-    if (state.spHidden) document.getElementById('sp').classList.add('hidden');
-    if (state.sbCollapsed) document.getElementById('sidebar').classList.add('sidebar-collapsed');
-    if (state.spCollapsed) document.getElementById('sp').classList.add('sidebar-collapsed');
-    if (state.selectedIds) {
-      selectedIds.clear();
-      state.selectedIds.forEach(id => selectedIds.add(id));
+    const state = JSON.parse(localStorage.getItem('ridecomp_state') || '{}');
+    if (BASEMAPS[state.basemap]) currentTile = state.basemap;
+    if (METRICS[state.chartMetric]) chartMetric = state.chartMetric;
+    panelCollapsed = !!state.panelCollapsed;
+    return state;
+  } catch(e) { console.error('State load error', e); return {}; }
+}
+
+function loadCfg() {
+  try {
+    const saved = localStorage.getItem('ridecomp_cfg');
+    if (saved) cfg = {...cfg, ...JSON.parse(saved)};
+    // config.js wins over empty saved values (e.g. after adding keys to config.js)
+    ['url','key','mapTilerKey','mapboxToken'].forEach(k => {
+      const fromFile = {url:C.supabaseUrl, key:C.supabaseKey, mapTilerKey:C.mapTilerKey, mapboxToken:C.mapboxToken}[k];
+      if (!cfg[k] && fromFile) cfg[k] = fromFile;
+    });
+  } catch(e) { console.warn('Config load error', e); }
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   GLOBAL EVENTS — drag & drop, keyboard, feed
+ ═══════════════════════════════════════════════════════════════ */
+function initEvents() {
+  // Feed: click / keyboard via delegation
+  const feed = document.getElementById('feed');
+  feed.addEventListener('click', e => {
+    const card = e.target.closest('.card');
+    if (!card) return;
+    if (e.target.closest('.card-vis')) { toggleVis(card.dataset.id); return; }
+    openDetail(card.dataset.id);
+  });
+  feed.addEventListener('keydown', e => {
+    const card = e.target.closest('.card');
+    if (!card) return;
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openDetail(card.dataset.id); }
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      (e.key === 'ArrowDown' ? card.nextElementSibling : card.previousElementSibling)?.focus();
     }
-    if (state.multiSelect !== undefined) {
-      multiSelectMode = state.multiSelect;
-      const toggle = document.getElementById('multi-select-toggle');
-      if (toggle) toggle.checked = state.multiSelect;
+  });
+
+  // Drag & drop files anywhere on the page
+  const drop = document.getElementById('drop');
+  let depth = 0;
+  const hasFiles = e => Array.from(e.dataTransfer?.types || []).includes('Files');
+  window.addEventListener('dragenter', e => { if (!hasFiles(e)) return; e.preventDefault(); depth++; drop.hidden = false; });
+  window.addEventListener('dragover',  e => { if (hasFiles(e)) e.preventDefault(); });
+  window.addEventListener('dragleave', e => { if (!hasFiles(e)) return; if (--depth <= 0) { depth = 0; drop.hidden = true; } });
+  window.addEventListener('drop', e => {
+    if (!hasFiles(e)) return;
+    e.preventDefault(); depth = 0; drop.hidden = true;
+    handleFiles(e.dataTransfer.files);
+  });
+
+  // Close the basemap menu on outside click
+  document.addEventListener('pointerdown', e => {
+    if (!e.target.closest('#layer-menu, #btn-layers')) toggleLayerMenu(false);
+  });
+
+  document.addEventListener('fullscreenchange', () => {
+    const b = document.getElementById('btn-fs');
+    b.innerHTML = icon(document.fullscreenElement ? 'shrink' : 'expand');
+    b.title = document.fullscreenElement ? 'Exit fullscreen' : 'Fullscreen';
+  });
+  if (!document.fullscreenEnabled) document.getElementById('btn-fs').hidden = true;
+
+  MOBILE_MQ.addEventListener('change', () => layoutSheet());
+  window.addEventListener('resize', () => layoutSheet());
+
+  document.addEventListener('keydown', e => {
+    const typing = ['INPUT','TEXTAREA','SELECT'].includes(document.activeElement?.tagName);
+    const mod = e.ctrlKey || e.metaKey;
+    if (mod && e.key === 'o') { e.preventDefault(); openFilePicker(); return; }
+    if (mod && e.key === 's') { e.preventDefault(); if (sbClient && currentUser) syncToSupabase(); return; }
+    if (e.key === 'Escape') {
+      const modal = document.querySelector('.modal-bg.open');
+      if (modal) { modal.classList.remove('open'); return; }
+      if (!document.getElementById('layer-menu').hidden) { toggleLayerMenu(false); return; }
+      if (typing) { document.activeElement.blur(); return; }
+      if (view !== 'list') backToList();
+      else if (compareMode) toggleCompareMode(false);
+      return;
     }
-  } catch(e) { console.error('State load error', e); }
+    if (typing || mod || e.altKey) return;
+    if (e.key === '/') { e.preventDefault(); if (view !== 'list') backToList(); setPanelCollapsed(false); document.getElementById('q').focus(); }
+    else if (e.key === '?') { e.preventDefault(); openHelp(); }
+    else if (e.key === 'b' || e.key === 'B') cycleBasemap();
+    else if (view === 'detail' && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+      // Step through rides in feed order without leaving the detail view
+      e.preventDefault();
+      const list = filteredRides();
+      const i = list.findIndex(r => r.id === activeId);
+      const next = list[i + (e.key === 'ArrowDown' ? 1 : -1)];
+      if (next) openDetail(next.id);
+    }
+  });
 }
 
 /* ═══════════════════════════════════════════════════════════════
    BOOT
  ═══════════════════════════════════════════════════════════════ */
-
 window.addEventListener('DOMContentLoaded', async () => {
-  // Restore theme
-  const _t = localStorage.getItem('ridecomp_theme');
-  if (_t) document.documentElement.setAttribute('data-theme', _t);
+  hydrateIcons();
+  loadCfg();
+  const state = loadState();
+  if (typeof L === 'undefined') {
+    document.getElementById('map').innerHTML = '<div class="note fatal">Map library failed to load. Check your connection and reload.</div>';
+    return;
+  }
+  Chart.defaults.font.family = 'Inter, system-ui, sans-serif';
+  Chart.defaults.color = '#94A3B8';
 
   initMap();
-
-  // Load config
-  try {
-    const saved = localStorage.getItem('ridecomp_cfg');
-    if (saved) {
-      cfg = {...cfg, ...JSON.parse(saved)};
-    }
-    if (cfg.url && cfg.key) {
-      sbClient = window.supabase.createClient(cfg.url, cfg.key);
-      updateDBBadge(true);
-      document.getElementById('btn-sync').style.display = '';
-      // Restore session
-      const {data} = await sbClient.auth.getUser();
-      if (data?.user) { currentUser = data.user; onSignedIn(); }
-      // Listen for auth changes
-      sbClient.auth.onAuthStateChange((_evt, session) => {
-        currentUser = session?.user || null;
-        if (currentUser) onSignedIn(); else onSignedOut();
-      });
-    }
-  } catch(e) { console.warn('Config load error', e); }
+  initEvents();
+  initSheetDrag();
+  setPanelCollapsed(panelCollapsed);
+  layoutSheet();
+  renderHeader();
+  
 
   // Open IndexedDB and restore rides
   try {
@@ -1513,74 +2044,15 @@ window.addEventListener('DOMContentLoaded', async () => {
     const stored = await idbAll();
     if (stored?.length) {
       loader(true, `Restoring ${stored.length} ride(s)…`);
-      stored.forEach(r => hydrate(r));
-      if (rides.length) {
-        const bounds = rides.map(r=>r.poly.getBounds()).reduce((a,b)=>a.extend(b));
-        map.fitBounds(bounds, {padding:[26,26]});
-      }
+      const hidden = new Set(state.hidden || []);
+      stored.forEach(rec => { const r = hydrate(rec); if (r && hidden.has(r.id)) r.visible = false; });
       loader(false);
+      focusRides(rides.filter(r => r.visible), false);
     }
-  } catch(e) { console.warn('IndexedDB unavailable, running in-memory', e); idb=null; }
+  } catch(e) { console.warn('IndexedDB unavailable, running in-memory', e); idb=null; loader(false); }
 
   refresh();
-  
-  // Map auto-resize observer
-  const mapEl = document.getElementById('map');
-  if (mapEl) {
-    const ro = new ResizeObserver(() => {
-      if (map) map.invalidateSize();
-    });
-    ro.observe(mapEl);
-  }
+  if (cfg.url && cfg.key) initSupabase();
 
-  loadState();
-  saveState();
-
-  // Debounced resize handler
-
-  let resizeTimer;
-  window.addEventListener('resize', () => {
-    clearTimeout(resizeTimer);
-    resizeTimer = setTimeout(() => {
-      if (profileChart) profileChart.resize();
-    }, 150);
-  });
-
-  // Keyboard shortcuts
-  document.addEventListener('keydown', e => {
-    // Ctrl/Cmd+O: Import files
-    if ((e.ctrlKey||e.metaKey)&&e.key==='o') { e.preventDefault(); document.getElementById('fi').click(); }
-    // Escape: Close modals/panels
-    if (e.key==='Escape') {
-      closeSettings();
-      document.getElementById('admin-mb').style.display='none';
-      closeAllPanels();
-    }
-    // Ctrl/Cmd+K: Toggle theme
-    if ((e.ctrlKey||e.metaKey)&&e.key==='k') { e.preventDefault(); toggleTheme(); }
-    // Ctrl/Cmd+S: Sync to Supabase
-    if ((e.ctrlKey||e.metaKey)&&e.key==='s') { e.preventDefault(); if(document.getElementById('btn-sync')?.style.display!=='none') syncToSupabase(); }
-    // Ctrl/Cmd+D: Clear all rides
-    if ((e.ctrlKey||e.metaKey)&&e.key==='d') { e.preventDefault(); if(rides.length) clearAll(); }
-    // ?: Open help (when not in input)
-    if (e.key==='?' && !['INPUT','TEXTAREA'].includes(document.activeElement?.tagName)) {
-      e.preventDefault();
-      openHelp();
-    }
-    // Arrow keys: Navigate rides (when sidebar focused)
-    if (e.key==='ArrowDown' && document.activeElement?.closest('#sidebar')) {
-      e.preventDefault();
-      const sel = document.querySelector('.rc.sel');
-      const next = sel?.nextElementSibling?.classList.contains('rc') ? sel.nextElementSibling : document.querySelector('.rc');
-      next?.click();
-    }
-    if (e.key==='ArrowUp' && document.activeElement?.closest('#sidebar')) {
-      e.preventDefault();
-      const sel = document.querySelector('.rc.sel');
-      const prev = sel?.previousElementSibling?.classList.contains('rc') ? sel.previousElementSibling : null;
-      prev?.click();
-    }
-  });
-
-  console.log(`RideComp v${VER} ready.`);
+  console.log(`RideMap v${VER} ready.`);
 });

@@ -1,4 +1,4 @@
-# RideComp AGENTS.md
+# RideMap AGENTS.md
 
 ## Running the app
 
@@ -7,46 +7,38 @@ python3 -m http.server 8080
 # open http://localhost:8080
 ```
 
-No build step, no node_modules. The app runs directly in browser.
+No build step, no node_modules. The app runs directly in the browser.
 
 ## Project structure
 
 ```
-RideComp/
-├── index.html              ~1700 LOC, main app (HTML+CSS+JS)
+ridemap/
+├── index.html            layout: map, control cluster, panel / bottom sheet, modals
 ├── assets/
-│   ├── script.js          main logic
-│   ├── style.css         styles
-│   ├── ridemap-patch.js  polyline halo + resizable panels
-│   ├── ridemap-patch.css
-│   └── exportGPX.js      GPX export, segment detection, lap parsing
-├── _headers              Cloudflare Pages security headers
+│   ├── script.js         main logic: parsers, stats, map, rendering, auth, sync
+│   ├── exportGPX.js      GPX + FIT export, shared-segment detection
+│   ├── style.css         dark glass theme, responsive layout (< 768px = bottom sheet)
+│   ├── config.example.js template for assets/config.js (gitignored)
+├── data/sample_ride.gpx
 ├── README.md             feature overview & Supabase setup
-├── PATCH_README.md       patch details
 └── AGENTS.md
 ```
 
 ## Key architecture details
 
-- **FIT parser**: Pure binary JS in `assets/script.js` (field 78 enhanced_altitude). `assets/exportGPX.js` handles Lap parsing (global msg 19).
-- **GPX parser**: DOMParser + XPath extension namespace traversal.
-- **Map**: Leaflet with multi-polyline overlay.
-- **Charts**: Chart.js (elevation/HR/speed/cadence/power).
-- **Persistence**: IndexedDB (local), JSON backup (import/export), or Supabase (cloud sync).
-- **Auth/Admin**: Supabase OAuth (GitHub, Google, FB) + Email. Registration requires admin approval via the Admin panel.
+- **FIT parser**: pure binary JS in `assets/script.js`, covering Record (msg 20) and Lap (msg 19) messages. Elevation comes from field 78 (enhanced_altitude).
+- **GPX parser**: DOMParser, matching extension elements by local name in a single pass.
+- **Map**: Leaflet with canvas-rendered polylines, simplified with Ramer-Douglas-Peucker. Free tiles by default. MapTiler and Mapbox keys are optional, are checked with `fetch()`, and fall back to free tiles. Don't use CARTO tiles: they now require an API key.
+- **Charts**: Chart.js profile (elevation, speed, HR, cadence, power), with hover synced between chart and map.
+- **Persistence**: IndexedDB (`ridecomp_v1`, a legacy name; keep it), JSON backup, optional Supabase sync.
+- **Auth/Admin**: Supabase OAuth (GitHub, Google, Facebook) and email. Registration requires admin approval.
 - **Segments**: `detectSharedSegments` in `assets/exportGPX.js` finds overlaps within 50m.
 
-## Patch files
-
-`assets/ridemap-patch.js` and `assets/ridemap-patch.css` are monkey-patches loaded from `index.html`. When modifying `assets/script.js`, watch for:
-- `setTileLayer()` at script.js:~76 — patch calls this to update tile layer halos
-- `window.map` at script.js:~77 — patch calls `window.map.invalidateSize()` after resize
-
-Name changes here will break the patches.
+Inline `onclick=` handlers call global functions, so renaming a function breaks the HTML.
 
 ## Testing
 
-No test suite exists. Manual testing via browser devtools.
+No test suite exists. Test by hand in the browser, at both desktop width and under 768px.
 
 ## Deployment
 
@@ -54,3 +46,4 @@ Cloudflare Pages (free):
 - Build command: empty
 - Output directory: `/`
 - Every `git push` auto-deploys.
+- `assets/config.js` isn't committed. Users enter Supabase and map keys in Settings → Connections.
