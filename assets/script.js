@@ -2,7 +2,7 @@
 /* ═══════════════════════════════════════════════════════════════
    CONSTANTS
  ═══════════════════════════════════════════════════════════════ */
-const VER = '2.0.0';
+const VER = '2.1.0';
 const IDB_NAME = 'ridecomp_v1';          // kept from RideComp so existing rides survive
 const IDB_STORE = 'rides';
 const STATS_VER = 2;                     // bump to force stats recompute on load
@@ -812,7 +812,7 @@ async function importRide(name, points, fileType, laps) {
   if (!points || !points.length) { toast('"'+name+'" has no GPS points', 'err'); return null; }
   const stats = computeStats(points);
   const fp = rideFingerprint(points, stats);
-  const dup = rides.find(r => r.fingerprint === fp) || await findCloudDuplicate(fp);
+  const dup = rides.find(r => r.fingerprint === fp) || await findCloudDuplicate(fp, stats);
   if (dup) { toast(`This ride has already been uploaded ("${dup.name}").`, 'warn'); return null; }
   return addRide(name, points, fileType, laps, stats);
 }
@@ -847,12 +847,12 @@ function deleteRide(id) { return deleteRides([id]); }
 
 // Delete from this device and, when signed in, from Supabase. Optimistic: the rides
 // disappear immediately and are put back if the cloud delete fails.
-async function deleteRides(ids) {
+async function deleteRides(ids, {confirmed = false} = {}) {
   const list = rides.filter(r => ids.includes(r.id));
   if (!list.length) return;
   const cloud = !!(sbClient && currentUser);
   const what = list.length === 1 ? `"${list[0].name}"` : `${list.length} rides`;
-  if (!confirm(`Delete ${what} from this device${cloud ? ' and the cloud' : ''}? This cannot be undone.`)) return;
+  if (!confirmed && !confirm(`Delete ${what} from this device${cloud ? ' and the cloud' : ''}? This cannot be undone.`)) return;
 
   const backup = list.map(r => ({rec: toRecord(r), pending: pendingSync.has(r.id), visible: r.visible}));
   list.forEach(detachRide);
@@ -867,12 +867,15 @@ async function deleteRides(ids) {
   const expected = backup.filter(b => !b.pending).map(b => b.rec.id);
   let failed = expected;
   try {
-    const {data, error} = expected.length
-      ? await sbClient.from('ridecomp_rides').delete().in('id', expected).eq('user_id', currentUser.id).select('id')
-      : {data: [], error: null};
-    if (error) throw error;
+    // Chunked so a big delete doesn't exceed URL length limits
+    const gone = new Set();
+    for (let i = 0; i < expected.length; i += 100) {
+      const {data, error} = await sbClient.from('ridecomp_rides')
+        .delete().in('id', expected.slice(i, i + 100)).eq('user_id', currentUser.id).select('id');
+      if (error) throw error;
+      (data || []).forEach(d => gone.add(d.id));
+    }
     // RLS without a delete policy "succeeds" but deletes nothing — check what actually went
-    const gone = new Set((data || []).map(d => d.id));
     failed = expected.filter(id => !gone.has(id));
     if (failed.length) throw new Error(`the cloud kept ${failed.length} ride(s) — is there a delete policy on ridecomp_rides?`);
     toast(`Deleted ${what}`, 'ok');
@@ -914,16 +917,18 @@ function toggleVis(id) {
   refresh();
 }
 
+// Deletes every ride from this device and, when signed in, from the cloud.
+// Stays signed in. Needs the word DELETE typed, not just a click.
 async function clearAll() {
-  if (!rides.length && !(await idbAll() || []).length) { toast('No rides to delete'); return; }
-  if (!confirm(`Delete all ${rides.length} ride(s) stored on this device? This cannot be undone.`)) return;
-  rides.forEach(r => map.removeLayer(r.group));
-  rides = []; selectedIds.clear(); pendingSync.clear();
-  await idbClear().catch(()=>{});
-  updateUnsavedChip();
+  const cloud = !!(sbClient && currentUser);
+  if (cloud) await loadRidesFromSupabase();   // make sure cloud-only rides are counted and deleted too
+  if (!rides.length) { toast('No rides to delete'); return; }
+  const where = cloud ? 'from this device AND from your cloud account' : 'from this device';
+  const typed = prompt(`This permanently deletes all ${rides.length} ride(s) ${where}.\nIt cannot be undone.\n\nType DELETE to confirm.`);
+  if (typed === null) return;
+  if (typed.trim() !== 'DELETE') { toast('Nothing deleted — type DELETE (in capitals) to confirm', 'warn'); return; }
   closeSettings();
-  backToList();
-  toast('All local rides deleted');
+  await deleteRides(rides.map(r => r.id), {confirmed: true});
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -1826,16 +1831,25 @@ async function initSupabase() {
 let cloudHasFingerprint = null;
 const isMissingColumn = e => e && (e.code === '42703' || e.code === 'PGRST204' || /fingerprint/.test(e.message || ''));
 
-async function findCloudDuplicate(fp) {
-  if (!sbClient || !currentUser || cloudHasFingerprint === false) return null;
-  const {data, error} = await sbClient.from('ridecomp_rides')
-    .select('id,name').eq('user_id', currentUser.id).eq('fingerprint', fp).limit(1);
-  if (error) {
-    if (isMissingColumn(error)) { cloudHasFingerprint = false; console.warn('ridecomp_rides.fingerprint missing — run the SQL in README.md'); }
-    else console.warn('Duplicate check failed', error);
-    return null;   // never block an upload because the check itself failed
+// Is this ride already stored in the cloud? Uses the fingerprint column when it exists,
+// otherwise the start time inside the stored stats JSON (same thing for recorded rides).
+async function findCloudDuplicate(fp, stats) {
+  if (!sbClient || !currentUser) return null;
+  const startIso = stats?.startDate ? new Date(stats.startDate).toISOString() : null;
+  const query = byFingerprint => {
+    const q = sbClient.from('ridecomp_rides').select('id,name').eq('user_id', currentUser.id).limit(1);
+    return byFingerprint ? q.eq('fingerprint', fp) : q.eq('stats->>startDate', startIso);
+  };
+  if (cloudHasFingerprint !== false) {
+    const {data, error} = await query(true);
+    if (!error) { cloudHasFingerprint = true; return data?.[0] || null; }
+    if (!isMissingColumn(error)) { console.warn('Duplicate check failed', error); return null; }
+    cloudHasFingerprint = false;
+    console.warn('ridecomp_rides.fingerprint missing — run the SQL in README.md. Falling back to start time.');
   }
-  cloudHasFingerprint = true;
+  if (!startIso) return null;   // untimed route and no fingerprint column: can't tell
+  const {data, error} = await query(false);
+  if (error) { console.warn('Duplicate check failed', error); return null; }   // never block on a failed check
   return data?.[0] || null;
 }
 
@@ -1900,6 +1914,9 @@ async function syncToSupabase() {
         stats:r.stats,
         color:r.color
       };
+      // Without the unique index the database would accept a second copy — check first
+      const dup = await findCloudDuplicate(r.fingerprint, r.stats);
+      if (dup && dup.id !== r.id) { pendingSync.delete(r.id); dupes++; continue; }
       if (cloudHasFingerprint !== false) payload.fingerprint = r.fingerprint;
       let {error} = await sbClient.from('ridecomp_rides').upsert(payload);
       if (error && isMissingColumn(error)) {

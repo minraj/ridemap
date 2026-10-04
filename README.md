@@ -137,6 +137,10 @@ $$;
 Each ride gets a `fingerprint`: its start time (`t:<unix seconds>`), or endpoints + distance for
 untimed routes. The same ride uploaded twice — renamed, or as GPX and FIT — has the same fingerprint.
 
+The app blocks duplicate uploads even before you run this (it falls back to comparing start times),
+but **deleting rides from the cloud needs step 6** — without a delete policy Supabase silently
+deletes nothing and the app puts the rides back with an error.
+
 ```sql
 -- 1. Column for the ride fingerprint
 alter table ridecomp_rides add column if not exists fingerprint text;

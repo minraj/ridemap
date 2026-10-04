@@ -187,7 +187,7 @@
       <button class="btn sm" onclick="exportJSON()"><span data-icon="download"></span>Backup JSON</button>
       <button class="btn sm" onclick="document.getElementById('json-in').click()"><span data-icon="upload"></span>Restore JSON</button>
       <button class="btn sm" onclick="exportGPX()"><span data-icon="download"></span>Export all GPX</button>
-      <button class="btn sm danger" onclick="clearAll()"><span data-icon="trash"></span>Delete all rides</button>
+      <button class="btn sm danger" onclick="clearAll()" title="Deletes every ride from this device and the cloud"><span data-icon="trash"></span>Delete all rides</button>
     </div>
     <input type="file" id="json-in" accept=".json" hidden onchange="importJSON(this)"/>
   </div>
