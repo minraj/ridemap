@@ -1013,6 +1013,7 @@ function setCompareTab(tab) {
 
 function setFilter(k, v) {
   filter[k] = v;
+  applyMapStyles();
   renderFeed();
 }
 
@@ -1044,10 +1045,11 @@ function focusSet() {
 
 function applyMapStyles() {
   const focus = focusSet();
+  const matched = new Set(filteredRides().map(r => r.id));   // search / date-range filter
   const front = [];
   rides.forEach(r => {
     const inFocus = focus ? focus.has(r.id) : true;
-    if (!r.visible && !(focus && inFocus)) { map.removeLayer(r.group); return; }
+    if (!(r.visible && matched.has(r.id)) && !(focus && inFocus)) { map.removeLayer(r.group); return; }
     if (!map.hasLayer(r.group)) r.group.addTo(map);
     const hero = view === 'detail' && r.id === activeId;
     r.poly.setStyle({opacity: inFocus ? 1 : .5, weight: hero ? 5 : inFocus ? 3.5 : 2.5});
