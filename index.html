@@ -212,6 +212,21 @@
 </div>
 </div>
 
+<!-- ═══ LOCAL RIDES MODAL (after sign-in, when this browser has rides the account doesn't) ═══ -->
+<div class="modal-bg" id="local-mb">
+<div class="modal glass" role="dialog" aria-labelledby="mt-local">
+  <h2 class="modal-title" id="mt-local">Rides on this device</h2>
+  <p class="modal-sub" id="local-msg"></p>
+  <div class="hint">Not sure? Download a backup first. "Decide later" asks again next time you sign in.</div>
+  <div class="modal-actions">
+    <button class="btn ghost sm" onclick="exportJSON()"><span data-icon="download"></span>Backup JSON</button>
+    <button class="btn ghost" onclick="closeLocalRides()">Decide later</button>
+    <button class="btn danger" onclick="discardLocalRides()">Discard</button>
+    <button class="btn primary" onclick="uploadLocalRides()">Upload</button>
+  </div>
+</div>
+</div>
+
 <!-- ═══ HELP MODAL ══════════════════════════════════════════════════════ -->
 <div class="modal-bg" id="help-mb" onclick="closeHelpBg(event)">
 <div class="modal glass" role="dialog">

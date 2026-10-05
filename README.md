@@ -176,6 +176,33 @@ create policy "Users delete own rides" on ridecomp_rides
   using (auth.uid()::text = user_id);
 ```
 
+### 2c. Row Level Security for rides (run once)
+
+When signed in, the app shows exactly what `ridecomp_rides` returns for the user, so a missing
+`select` policy looks like an empty account. `user_id` is `text`, so compare against
+`auth.uid()::text` (a bare `auth.uid() = user_id` fails with `operator does not exist: uuid = text`).
+Uploads use upsert, which needs `insert` **and** `update`.
+
+```sql
+alter table ridecomp_rides enable row level security;
+
+drop policy if exists "Users can manage their own rides" on ridecomp_rides;
+create policy "Users can manage their own rides" on ridecomp_rides
+  for all to authenticated
+  using (auth.uid()::text = user_id)
+  with check (auth.uid()::text = user_id);
+
+-- Check: RLS on, and the policies in place
+select relrowsecurity from pg_class where relname = 'ridecomp_rides';
+select policyname, cmd, roles, qual, with_check from pg_policies where tablename = 'ridecomp_rides';
+
+-- Rides per account (the SQL editor bypasses RLS). Signing in with a different provider
+-- (GitHub vs Google) is a different auth user, with its own rides.
+select r.user_id, u.email, count(*) from ridecomp_rides r
+left join auth.users u on u.id::text = r.user_id
+group by 1, 2;
+```
+
 ### 3. Enable OAuth providers
 
 Supabase → Authentication → Providers → enable GitHub / Google / Facebook and add your OAuth app credentials from each provider's developer console.

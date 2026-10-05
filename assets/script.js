@@ -736,8 +736,10 @@ function computeStats(pts) {
 ═══════════════════════════════════════════════════════════════ */
 const rideById = id => rides.find(r => r.id === id);
 
+// owner: id of the account whose cloud this record mirrors. Missing = a ride saved only
+// in this browser (guest uploads, or not synced yet). Local only, never sent to Supabase.
 function toRecord(r) {
-  return {id:r.id, name:r.name, color:r.color, points:r.points, stats:r.stats, fileType:r.fileType, laps:r.laps, savedAt:r.savedAt};
+  return {id:r.id, name:r.name, color:r.color, points:r.points, stats:r.stats, fileType:r.fileType, laps:r.laps, savedAt:r.savedAt, owner:r.owner || null};
 }
 
 function nextColor() {
@@ -758,7 +760,7 @@ function hydrate(rec) {
     id: rec.id, name: rec.name, color: rec.color || nextColor(),
     points: pts, stats, fileType: rec.fileType || rec.file_type || 'gpx',
     laps: rec.laps || [], savedAt: rec.savedAt || Date.parse(rec.created_at) || Date.now(),
-    visible: true,
+    owner: rec.owner || null, visible: true,
   };
   r.fingerprint = pts.length ? rideFingerprint(pts, stats) : null;
   r.cum   = cumulativeKm(pts);
@@ -834,13 +836,38 @@ function addRide(name, points, fileType, laps, stats) {
   return r;
 }
 
-// Take a ride out of memory, the map and IndexedDB (not the cloud)
-function detachRide(r) {
+// Take a ride out of memory and off the map. IndexedDB keeps it.
+function unloadRide(r) {
   map.removeLayer(r.group);
   rides = rides.filter(x => x.id !== r.id);
   pendingSync.delete(r.id);
   selectedIds.delete(r.id);
+  if (r.id === activeId) { view = 'list'; activeId = null; }
+}
+
+// Take a ride out of memory, the map and IndexedDB (not the cloud)
+function detachRide(r) {
+  unloadRide(r);
   idbDel(r.id).catch(()=>{});
+}
+
+const savedHidden = () => {
+  try { return new Set(JSON.parse(localStorage.getItem('ridecomp_state') || '{}').hidden || []); }
+  catch { return new Set(); }
+};
+
+// Show rides from IndexedDB. Only for guests (rides saved in this browser) and for a
+// signed-in user who is offline (that account's cached rides plus local ones).
+async function restoreCachedRides(uid) {
+  const stored = (await idbAll().catch(() => null)) || [];
+  const recs = stored.filter(rec => !rec.owner || rec.owner === uid);
+  if (!recs.length) return;
+  loader(true, `Restoring ${recs.length} ride(s)…`);
+  const hidden = savedHidden();
+  recs.forEach(rec => { const r = hydrate(rec); if (r && hidden.has(r.id)) r.visible = false; });
+  loader(false);
+  focusRides(rides.filter(r => r.visible), false);
+  refresh();
 }
 
 function deleteRide(id) { return deleteRides([id]); }
@@ -1655,17 +1682,90 @@ function signOut() {
 }
 
 let _signedInFor = null;
+const isOfflineError = e => !navigator.onLine || /failed to fetch|networkerror|load failed/i.test(e?.message || '');
+
+// Signed in, the cloud decides which rides show: an empty table means no rides.
+// IndexedDB is only used when the cloud can't be reached.
 async function onSignedIn() {
   renderHeader();
   if (_signedInFor === currentUser?.id) return;   // onAuthStateChange re-fires on load
   _signedInFor = currentUser?.id;
+  const uid = currentUser.id;
   closeSettings();
   toast('Signed in as ' + userLabel(), 'ok');
-  await loadRidesFromSupabase();
+  // Rides shown before signing in were local-only. They're offered for upload below.
+  [...rides].filter(r => r.owner !== uid).forEach(unloadRide);
+  refresh();
+  const {rows, error} = await loadRidesFromSupabase();
+  if (currentUser?.id !== uid) return;   // signed out while loading
+  if (rows) {
+    focusRides(rides.filter(r => r.visible), false);
+    await offerLocalRides();
+  } else if (isOfflineError(error)) {
+    await restoreCachedRides(uid);
+    toast('Offline: showing rides saved on this device', 'warn');
+  }
 }
+
+// Back to guest mode: this account's rides leave the screen (IndexedDB keeps them as
+// an offline cache) and only rides saved in this browser show.
 function onSignedOut() {
+  const wasSignedIn = !!_signedInFor;
   _signedInFor = null;
   renderHeader();
+  if (!wasSignedIn) return;
+  closeLocalRides();
+  localRides = [];
+  [...rides].forEach(unloadRide);
+  selectMode = false;
+  refresh();
+  restoreCachedRides();
+}
+
+// Rides saved in this browser that the signed-in account doesn't have. Asks whether
+// to upload or discard them; copies of rides the cloud already has go without asking.
+let localRides = [];
+async function offerLocalRides() {
+  const uid = currentUser.id;
+  const stored = (await idbAll().catch(() => null)) || [];
+  const cloudFps = new Set(rides.filter(r => r.owner === uid).map(r => r.fingerprint));
+  localRides = [];
+  for (const rec of stored) {
+    if (rideById(rec.id)) continue;
+    // Another account's cache, or this account's copy of a ride deleted from the cloud elsewhere
+    if (rec.owner) { idbDel(rec.id).catch(()=>{}); continue; }
+    if (!rec.points?.length) continue;
+    if (cloudFps.has(rideFingerprint(rec.points, rec.stats || computeStats(rec.points)))) {
+      idbDel(rec.id).catch(()=>{});
+      continue;
+    }
+    localRides.push(rec);
+  }
+  const n = localRides.length;
+  if (!n) return;
+  document.getElementById('local-msg').textContent =
+    `We found ${n} ride${n === 1 ? '' : 's'} saved locally in your browser that ${n === 1 ? "isn't" : "aren't"} ` +
+    `in your account. Upload ${n === 1 ? 'it' : 'them'} to your account, or discard the local cache?`;
+  document.getElementById('local-mb').classList.add('open');
+}
+function closeLocalRides() { document.getElementById('local-mb').classList.remove('open'); }
+
+async function uploadLocalRides() {
+  closeLocalRides();
+  if (!currentUser) return;
+  localRides.forEach(rec => { const r = hydrate(rec); if (r) pendingSync.add(r.id); });
+  localRides = [];
+  refresh();
+  await syncToSupabase();   // each uploaded ride becomes this account's cached copy
+}
+
+function discardLocalRides() {
+  const n = localRides.length;
+  if (!confirm(`Delete ${n} ride(s) from this browser? They are not in your account, so this cannot be undone.`)) return;
+  localRides.forEach(rec => idbDel(rec.id).catch(()=>{}));
+  localRides = [];
+  closeLocalRides();
+  toast(`Discarded ${n} local ride(s)`);
 }
 function isAdmin() {
   return currentUser?.user_metadata?.role === 'admin' ||
@@ -1810,15 +1910,17 @@ async function initSupabase() {
   try {
     sbClient = window.supabase.createClient(cfg.url, cfg.key);
     
-    // Restore session
-    const {data, error} = await sbClient.auth.getUser();
-    if (error && error.name !== 'AuthSessionMissingError') console.warn('Supabase auth:', error.message);
-    if (data?.user) { currentUser = data.user; onSignedIn(); }
+    // Restore session. getSession reads local storage, so an offline user stays signed in
+    // and gets their cached rides instead of guest mode.
+    const {data, error} = await sbClient.auth.getSession();
+    if (error) console.warn('Supabase auth:', error.message);
+    currentUser = data?.session?.user || null;
     // Listen for auth changes
     sbClient.auth.onAuthStateChange((_evt, session) => {
       currentUser = session?.user || null;
       if (currentUser) onSignedIn(); else onSignedOut();
     });
+    if (currentUser) await onSignedIn();
   } catch(e) {
     sbClient = null;
     
@@ -1853,30 +1955,49 @@ async function findCloudDuplicate(fp, stats) {
   return data?.[0] || null;
 }
 
+// Make the screen match the cloud: rides the cloud returns are shown, rides it doesn't
+// are removed (except ones added here that are still waiting to upload).
+// Resolves to {rows} or {error}.
 let _cloudLoad = null;
 function loadRidesFromSupabase() {
   // Shared promise: sign-in can fire twice on load and would hydrate rides twice
   return _cloudLoad || (_cloudLoad = (async () => {
-    if (!sbClient || !currentUser) return;
+    if (!sbClient || !currentUser) return {error: new Error('Not signed in')};
+    const uid = currentUser.id;
     try {
-      const {data, error} = await sbClient.from('ridecomp_rides').select('*').eq('user_id', currentUser.id);
+      const {data, error} = await sbClient.from('ridecomp_rides').select('*').eq('user_id', uid);
       if (error) throw error;
-      if (data?.length) cloudHasFingerprint = 'fingerprint' in data[0];
-      const fresh = (data || []).filter(r => !rideById(r.id));
-      if (!fresh.length) { backfillFingerprints(data || []); return; }
-      loader(true, `Loading ${fresh.length} ride(s) from cloud…`);
-      for (const r of fresh) {
-        const ride = hydrate(r);
-        if (ride) await idbPut(toRecord(ride)).catch(() => {});
+      const rows = data || [];
+      if (rows.length) cloudHasFingerprint = 'fingerprint' in rows[0];
+      const inCloud = new Set(rows.map(r => r.id));
+      // A ride this account had that's gone from the cloud was deleted elsewhere
+      [...rides].filter(r => !inCloud.has(r.id) && !pendingSync.has(r.id))
+        .forEach(r => r.owner ? detachRide(r) : unloadRide(r));
+      rides.filter(r => inCloud.has(r.id) && r.owner !== uid).forEach(r => {
+        r.owner = uid;
+        pendingSync.delete(r.id);
+        idbPut(toRecord(r)).catch(() => {});
+      });
+      const fresh = rows.filter(r => !rideById(r.id));
+      if (fresh.length) loader(true, `Loading ${fresh.length} ride(s) from cloud…`);
+      const hidden = savedHidden();
+      for (const row of fresh) {
+        const ride = hydrate({...row, owner: uid});
+        if (!ride) continue;
+        if (hidden.has(ride.id)) ride.visible = false;
+        await idbPut(toRecord(ride)).catch(() => {});
       }
       loader(false);
+      updateUnsavedChip();
       refresh();
-      toast(`Loaded ${fresh.length} ride(s) from cloud`, 'ok');
-      backfillFingerprints(data);
+      if (fresh.length) toast(`Loaded ${fresh.length} ride(s) from cloud`, 'ok');
+      backfillFingerprints(rows);
+      return {rows};
     } catch(e) {
       loader(false);
       console.error('Failed to load rides from Supabase', e);
-      toast('Could not load cloud rides: ' + e.message, 'err');
+      if (!isOfflineError(e)) toast('Could not load cloud rides: ' + e.message, 'err');
+      return {error: e};
     } finally {
       _cloudLoad = null;
     }
@@ -1916,7 +2037,7 @@ async function syncToSupabase() {
       };
       // Without the unique index the database would accept a second copy — check first
       const dup = await findCloudDuplicate(r.fingerprint, r.stats);
-      if (dup && dup.id !== r.id) { pendingSync.delete(r.id); dupes++; continue; }
+      if (dup && dup.id !== r.id) { detachRide(r); dupes++; continue; }   // keep the cloud's copy
       if (cloudHasFingerprint !== false) payload.fingerprint = r.fingerprint;
       let {error} = await sbClient.from('ridecomp_rides').upsert(payload);
       if (error && isMissingColumn(error)) {
@@ -1925,9 +2046,11 @@ async function syncToSupabase() {
         ({error} = await sbClient.from('ridecomp_rides').upsert(payload));
       }
       // Unique (user_id, fingerprint): the cloud already has this ride under another id
-      if (error && error.code === '23505') { pendingSync.delete(r.id); dupes++; continue; }
+      if (error && error.code === '23505') { detachRide(r); dupes++; continue; }
       if (error) throw error;
       pendingSync.delete(r.id); ok++;
+      r.owner = currentUser.id;
+      idbPut(toRecord(r)).catch(()=>{});
     } catch(e) {
       fail++;
       console.error('Sync error for ride', r.id, e);
@@ -1936,6 +2059,7 @@ async function syncToSupabase() {
   }
   loader(false);
   updateUnsavedChip();
+  refresh();
   const skipped = dupes ? ` · ${dupes} already in the cloud (skipped)` : '';
   toast((fail ? `Synced ${ok}, failed ${fail}` : `${ok} ride(s) synced`) + skipped, fail ? 'err' : dupes ? 'warn' : 'ok');
 }
@@ -1961,11 +2085,13 @@ function importJSON(input) {
       let added=0;
       for (const rec of arr) {
         if (!rec.id||!rec.points) continue;
-        const r = hydrate(rec);
+        const r = hydrate({...rec, owner: null});   // local until it's synced
         if (!r) continue;
         await idbPut(toRecord(r)).catch(()=>{});
+        if (currentUser) pendingSync.add(r.id);
         added++;
       }
+      updateUnsavedChip();
       refresh();
       toast(`Imported ${added} ride(s)`, 'ok');
     } catch(e) { toast('Import failed: '+e.message,'err'); }
@@ -2164,7 +2290,7 @@ function initEvents() {
 window.addEventListener('DOMContentLoaded', async () => {
   hydrateIcons();
   loadCfg();
-  const state = loadState();
+  loadState();
   if (typeof L === 'undefined') {
     document.getElementById('map').innerHTML = '<div class="note fatal">Map library failed to load. Check your connection and reload.</div>';
     return;
@@ -2180,21 +2306,13 @@ window.addEventListener('DOMContentLoaded', async () => {
   renderHeader();
   
 
-  // Open IndexedDB and restore rides
-  try {
-    idb = await openIDB();
-    const stored = await idbAll();
-    if (stored?.length) {
-      loader(true, `Restoring ${stored.length} ride(s)…`);
-      const hidden = new Set(state.hidden || []);
-      stored.forEach(rec => { const r = hydrate(rec); if (r && hidden.has(r.id)) r.visible = false; });
-      loader(false);
-      focusRides(rides.filter(r => r.visible), false);
-    }
-  } catch(e) { console.warn('IndexedDB unavailable, running in-memory', e); idb=null; loader(false); }
+  try { idb = await openIDB(); }
+  catch(e) { console.warn('IndexedDB unavailable, running in-memory', e); idb = null; }
 
   refresh();
-  initSupabase();   // always: also completes a GitHub sign-in redirect landing on this page
+  // Signed in: the cloud decides which rides show (onSignedIn). Guest: rides saved in this browser.
+  await initSupabase();   // always: also completes a GitHub sign-in redirect landing on this page
+  if (!currentUser) await restoreCachedRides();
 
   console.log(`RideMap v${VER} ready.`);
 });
